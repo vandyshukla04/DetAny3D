@@ -113,6 +113,17 @@ def main(argv=None):
     logger.info(f"loading GT {args.gt}")
     omni_gt = Omni3D([str(args.gt)])
 
+    # ovmono3d's prepare_wildbox_dataset.py emits 'bbox3D_cam' but the
+    # evaluator reads 'bbox3D'. Mirror the key on every loaded annotation
+    # so Omni3DevalWithNHD.computeIoU at line 1675 works.
+    n_aliased = 0
+    for ann in omni_gt.anns.values():
+        if "bbox3D" not in ann and "bbox3D_cam" in ann:
+            ann["bbox3D"] = ann["bbox3D_cam"]
+            n_aliased += 1
+    if n_aliased:
+        logger.info(f"aliased bbox3D <- bbox3D_cam on {n_aliased} GT annotations")
+
     logger.info(f"loading predictions {args.predictions}")
     import torch
     preds_per_image = torch.load(str(args.predictions), weights_only=False, map_location="cpu")

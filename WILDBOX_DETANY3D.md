@@ -136,12 +136,58 @@ start_epoch = checkpoint['epoch'] if is_continuation else 0
 
 Canary check after any training run: `grep -cE "iter[er]?[: ][0-9]+" exps/<run>/log.txt` should be > 50. The orchestrator does this automatically and exits non-zero if it isn't.
 
-### 3.5 Other gotchas worth flagging
+### 3.5 Multi-GPU first-allgather hang (NCCL ALLGATHER timeout)
+
+**Observed twice on this cluster.** With `torchrun --nproc_per_node=4`, all 4 ranks reach `NCCL Init COMPLETE`, the GPUs sit at 100% util, the tensorboard event file stays at 88 bytes (header only), and after the default 30-min NCCL watchdog every rank dies with:
+
+```
+[E ProcessGroupNCCL.cpp:821] [Rank N] Watchdog caught collective operation timeout:
+WorkNCCL(SeqNum=1, OpType=ALLGATHER, Timeout(ms)=1800000)
+```
+
+`SeqNum=1` = the very first DDP collective, which fires after the first forward+backward. The likely cause is straggler skew — one rank takes longer on first-batch image decode from `/storage3` NFS while the others wait at the synchronizing allgather, and the watchdog kills everyone. AMP-on with frozen backbones may compound this via gradient-bucket reduce stalls on inf/nan in fp16.
+
+Fixed in commit `db7bb37` by raising the timeout to 4 hours at [train.py:444](train.py#L444):
+
+```python
+dist.init_process_group("nccl", timeout=timedelta(hours=4))
+```
+
+Even with the longer timeout, both 4-GPU attempts on this cluster still failed to complete a single iter — the model never wrote anything beyond NCCL init. We pivoted to **1-GPU final** for the first paper-quality run; 4-GPU + DDP debugging is deferred. See §10 future work.
+
+For the 1-GPU run no NCCL collectives fire — the fix is environmental: just don't use DDP for now. When re-enabling multi-GPU later, also try `find_unused_parameters=False` (currently `True` at [train.py:535](train.py#L535)) and the env vars:
+
+```bash
+export NCCL_BLOCKING_WAIT=1
+export TORCH_NCCL_ASYNC_ERROR_HANDLING=1
+export NCCL_DEBUG=WARN
+```
+
+### 3.6 Eval-config interval persists across runs (gotcha)
+
+`wildbox_eval_oracle2d.yaml`'s `dataset.val.wildbox.range.interval` is a regular config field — edits to it persist on disk across runs. If a smoke-debug session sets `interval: 20` (every 20th val image) and the user later runs the final pipeline, the final eval **also** runs at interval=20 and produces metrics on a small subsample matching smoke's numbers exactly.
+
+Symptom: full-final zero-shot eval reports the same `n_preds=3167` and `2D AP=0.028` as smoke, because both ran on the same 689-image subsample. Always reset before launching final:
+
+```bash
+python -c "
+import re
+p = 'detect_anything/configs/wildbox/wildbox_eval_oracle2d.yaml'
+s = open(p).read()
+s = re.sub(r'(range:\s*\{[^}]*?)interval:\s*\d+', r'\1interval: 1', s)
+open(p, 'w').write(s)
+"
+```
+
+Note: the smoke pickle (`WildBox_smoke_val.pkl`) and final pickle (`WildBox_val.pkl`) are **byte-identical** in this repo — the converter doesn't subsample, only the config's `interval` does. The `_smoke_` suffix in the pickle name is cosmetic; both files hold the full 13779 val records.
+
+### 3.7 Other gotchas worth flagging
 
 - **`libGL.so.1` on compute nodes** — same as ovmono3d's [§3.1.4](../ovmono3d/WILDBOX_EXPERIMENT.md). Use `opencv-python-headless` only (see §3.2).
 - **`KeyError: 'gradient_checkpointing'` style errors from GDino** during model load — only matter if we actually call GDino at runtime, which we don't.
 - **DDP with all parameters frozen** — eval configs that set `freeze.{image_encoder, prompt_encoder, mask_decoder}: True` break PyTorch's DDP wrap with `RuntimeError: DistributedDataParallel is not needed when a module doesn't have any parameter that requires a gradient`. Set all three to `False` in eval configs (the model still runs in eval mode via `model.eval()`).
-- **Empty `prepare_for_dsam`** — when `filter_objects` rejects every annotation in a frame (e.g. animals at frame edges with off-screen 3D centers), training crashes with `element 0 of tensors does not require grad`. Patched in [detany3d_dataset.py:236](detect_anything/datasets/detany3d_dataset.py#L236) to recurse to a random sample.
+- **Empty `prepare_for_dsam`** — when `filter_objects` rejects every annotation in a frame (e.g. animals at frame edges with off-screen 3D centers), training crashes with `element 0 of tensors does not require grad`. Patched in [detany3d_dataset.py:242](detect_anything/datasets/detany3d_dataset.py#L242) to recurse to a random sample (matches the upstream pattern at line 175 for missing image paths).
+- **`Killed` on `python -c "import torch"` inside srun** — SLURM CPU-memory cap. Re-`srun` with `--mem=128G` or `--mem=200G`.
 
 ---
 
@@ -299,8 +345,12 @@ For new zips (same species), or new species, follow ovmono3d's [§8](../ovmono3d
 | 7 | **Silent-skip-training**: train run exits without iterating | Released checkpoint has `epoch=93`; resume sets `start_epoch=93` > `num_epochs` | `start_epoch=0` when not continuing a prior training run | `eeee735` |
 | 8 | `cv2.error: libGL.so.1: cannot open shared object file` | `opencv-python` (non-headless) needs system graphics libs not present on compute nodes | Use `opencv-python-headless` only | env fix |
 | 9 | `requirements.txt` has `@ file:///croot/...` lines that fail with `pip install -r` | Conda-build artifact paths from upstream authors' machine | Use cleaned [requirements_clean.txt](requirements_clean.txt) with `--no-deps` | branch artifact |
+| 10 | **NCCL ALLGATHER timeout** (SeqNum=1) — all 4 ranks die after 30 min, no iter completes | First-batch I/O straggler skew across ranks; default 30-min watchdog too tight | Raise `init_process_group(..., timeout=timedelta(hours=4))`. Even with the longer timeout, 4-GPU runs on this cluster still don't progress past NCCL Init COMPLETE — we run final on 1 GPU. | `db7bb37` (timeout) + ops decision |
+| 11 | Final eval reports the **same metrics as smoke** despite running "on full val" | `wildbox_eval_oracle2d.yaml`'s `interval: 20` from a smoke debug session persisted on disk into the final run, restricting eval to 689 of 13779 val images | Reset `interval: 1` (or chosen value) explicitly before each final eval run; see §3.6 | ops |
 
 Bug #7 is the silent killer; canary check on every training run is `grep -cE "iter[er]?[: ][0-9]+" exps/<run>/log.txt` > 50.
+
+Bug #10 is the multi-GPU killer; do **not** assume a passing 1-GPU smoke means 4-GPU final will work. They have different failure modes; see §3.5.
 
 ---
 
@@ -342,15 +392,26 @@ DetAny3D rows are produced by `tools/wildbox_final.sh`. Each row's directory has
 
 - **Branch**: `wildbox_detany3d` on `https://github.com/vandyshukla04/DetAny3D`
 - **Env**: `/storage3/3DOM/vshukla/envs/detany3d` on the cluster (Python 3.8, torch 1.13.1+cu116, mmcv 2.0.1 with CUDA ops, opencv-python-headless, GroundingDINO at the pinned commit)
-- **Smoke run**: green end-to-end. Numbers (1/50 train subsample × 3 epochs at this scale, expect 5-10× higher on full data):
-  - Zero-shot: AP_3D@0.25=0.0, BEV macro@0.25=0.0, NHD best-scale=0.10 (severely under-scaled)
+- **Smoke run**: green end-to-end. Numbers (1/50 train subsample × 3 epochs):
+  - Zero-shot: AP_3D@0.25=0.000, BEV macro@0.25=0.00, NHD best-scale=0.10 (severely under-scaled)
   - Fine-tuned: AP_3D@0.25=0.0018, BEV macro@0.25=2.61, NHD best-scale=0.94 (recovered to ≈unit scale)
   - Pattern matches ovmono3d's documented expectations: pretrained 3D priors fail for wildlife synthetic scale, fine-tuning recovers it.
-- **Final run**: ready to launch (see [FINAL_RUN_DETANY3D.md](FINAL_RUN_DETANY3D.md))
-- **Multi-seed**: deferred. Re-run [tools/wildbox_final.sh](tools/wildbox_final.sh) with `SEED=1`, `SEED=2` (after adding seed handling to the config) for rare-class mean±std reporting per [ovmono3d §6.5](../ovmono3d/WILDBOX_EXPERIMENT.md).
+
+- **Final run** (in progress, single-seed, see [FINAL_RUN_DETANY3D.md](FINAL_RUN_DETANY3D.md)):
+  - Two 4-GPU attempts hung at NCCL ALLGATHER `SeqNum=1` (see §3.5, bug #10). 4-GPU DDP is deferred.
+  - Pivoted to **1×A40, 1 epoch, full train (46k samples)**, val at `interval=4` (3,445 of 13,779 images) for both zero-shot and fine-tuned eval to fit within a 10h srun.
+  - `num_epochs: 1` in `wildbox_final.yaml` (was 3 originally; reduced for time-fit).
+  - `use_amp: True` retained (AMP-off was tested briefly during 4-GPU debugging; 1-GPU run uses defaults).
+  - Phase split (manual, bypassing the orchestrator's all-stages-in-one flow):
+    - Phase A — score the existing zero-shot prediction JSON via export + BEV + class_agnostic + full_metrics + visualize.
+    - Phase B — run training, then FT eval, then export + score the FT row.
+
+- **Multi-seed**: deferred. Each additional seed = ~9h of GPU time at this scale. Add seed plumbing to `train.py` first (currently no explicit `torch.manual_seed` call).
 
 Future work in priority order:
-1. Multi-seed (3 × full final).
-2. RPN-transfer-equivalent row for DetAny3D — would need a learned classification head on the prompt encoder; out of scope for v1.
-3. Higher input resolution for small-class bottleneck (gazelle).
-4. Ensemble across seeds.
+1. **Debug 4-GPU DDP** — try `find_unused_parameters=False`, prefetch warming, or single-rank dataloader-then-broadcast. The headline run is 1-GPU but multi-seed without DDP is prohibitively slow.
+2. **Multi-seed (3 × full final)** — only viable after #1.
+3. **Full-val eval at interval=1** — currently using interval=4 to fit in srun; full val gives directly comparable numbers to ovmono3d (which evals at interval=1). Re-eval the saved checkpoint in a separate srun.
+4. **RPN-transfer-equivalent row for DetAny3D** — would need a learned classification head on the prompt encoder; out of scope for v1.
+5. **Higher input resolution for small-class bottleneck** (gazelle median bbox ~9×9 px after resize).
+6. **Ensemble across seeds**.

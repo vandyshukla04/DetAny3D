@@ -102,6 +102,19 @@ PY
 
 Expected: `interval: 50` for smoke train, `interval: 20` for both smoke val and eval val. **Do not commit these edits** — for the final run we want `interval: 1`.
 
+⚠️ **Important — these edits persist on disk after the smoke finishes.** If you go straight from smoke to final without resetting them, the final eval silently runs at `interval: 20` (689 of 13779 val images) and reports the **same numbers as smoke**, masquerading as full-final results. We hit this hazard once during this branch's development (see [WILDBOX_DETANY3D.md §3.6, bug #11](WILDBOX_DETANY3D.md)). Before launching the final run:
+
+```bash
+# Reset eval val interval to 1 (or whatever you actually want for final).
+python -c "
+import re
+p = 'detect_anything/configs/wildbox/wildbox_eval_oracle2d.yaml'
+s = open(p).read()
+s = re.sub(r'(range:\s*\{[^}]*?)interval:\s*\d+', r'\1interval: 1', s)
+open(p, 'w').write(s)
+"
+```
+
 ---
 
 ## 3. Claim a single A40 (smoke is fast enough)
@@ -266,4 +279,4 @@ In order most likely to be wrong (mirrors [WILDBOX_DETANY3D.md §8](WILDBOX_DETA
 
 For deeper debugging see [WILDBOX_DETANY3D.md §3 / §8](WILDBOX_DETANY3D.md).
 
-Once green, scale up to the full run via [FINAL_RUN_DETANY3D.md](FINAL_RUN_DETANY3D.md).
+Once green, scale up to the full run via [FINAL_RUN_DETANY3D.md](FINAL_RUN_DETANY3D.md). **Don't forget to reset the eval-config interval first** (see §2 yellow callout above and [WILDBOX_DETANY3D.md §3.6](WILDBOX_DETANY3D.md)) — going straight from smoke to final without that reset is the most common way to produce "full-final" numbers that are actually a smoke-subsample replay.

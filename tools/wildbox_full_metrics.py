@@ -114,15 +114,18 @@ def main(argv=None):
     omni_gt = Omni3D([str(args.gt)])
 
     # ovmono3d's prepare_wildbox_dataset.py emits 'bbox3D_cam' but the
-    # evaluator reads 'bbox3D'. Mirror the key on every loaded annotation
-    # so Omni3DevalWithNHD.computeIoU at line 1675 works.
-    n_aliased = 0
+    # Omni3DevalWithNHD reads 'bbox3D'. The 3D area-range filter at
+    # omni3d_evaluation.py:1748 also reads top-level 'depth'. Inject both.
+    n_aliased = n_depth = 0
     for ann in omni_gt.anns.values():
         if "bbox3D" not in ann and "bbox3D_cam" in ann:
             ann["bbox3D"] = ann["bbox3D_cam"]
             n_aliased += 1
-    if n_aliased:
-        logger.info(f"aliased bbox3D <- bbox3D_cam on {n_aliased} GT annotations")
+        if "depth" not in ann and "center_cam" in ann:
+            ann["depth"] = float(ann["center_cam"][2])
+            n_depth += 1
+    logger.info(f"GT normalisation: bbox3D aliased on {n_aliased}, "
+                f"depth synthesised on {n_depth} annotations")
 
     logger.info(f"loading predictions {args.predictions}")
     import torch

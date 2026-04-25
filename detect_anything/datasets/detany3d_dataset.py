@@ -70,8 +70,24 @@ class DetAny3DDataset(Dataset):
             self.dino_model = load_model("GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py", "GroundingDINO/weights/groundingdino_swint_ogc.pth")
             self.BOX_TRESHOLD = 0.001
             self.TEXT_TRESHOLD = 0.25
-        with open('./data/category_meta.json', 'r') as f:
+
+        # Optional: precomputed oracle-2D source (e.g. ovmono3d's
+        # gdino_WildBox_val_oracle_2d.json). Activates the
+        # generate_oracle_list path; bypasses both GT-prompt and
+        # in-process GDino. See detect_anything/datasets/data_creator/wildbox.py.
+        category_meta_path = getattr(self.cfg.dataset, 'category_meta_path',
+                                     './data/category_meta.json')
+        with open(category_meta_path, 'r') as f:
             self.category_id = json.load(f)
+
+        self.oracle_2d_by_image_id = None
+        if self.mode == 'val' and getattr(self.cfg.dataset, 'oracle_2d_input', False):
+            oracle_path = self.cfg.dataset.oracle_2d_path
+            with open(oracle_path, 'r') as f:
+                oracle_entries = json.load(f)
+            self.oracle_2d_by_image_id = {int(e['image_id']): e for e in oracle_entries}
+            print(f"loaded oracle-2D entries for {len(self.oracle_2d_by_image_id)} images "
+                  f"from {oracle_path}")
 
     def _load_single_dataset(self, dataset_name, dataset_info):
         """加载单个数据集的功能，供重复使用"""
@@ -203,13 +219,15 @@ class DetAny3DDataset(Dataset):
         # nomalize and pad for sam
         img_for_sam = self.preprocess(img).squeeze(0)
 
-        if self.mode == 'val' and self.cfg.dataset.dino_as_input:
+        if self.mode == 'val' and self.oracle_2d_by_image_id is not None:
+            prepare_for_dsam = self.generate_oracle_list(instance, K, before_pad_size, original_size)
+        elif self.mode == 'val' and self.cfg.dataset.dino_as_input:
             prepare_for_dsam = self.generate_dino_list(img_path, instance, K, before_pad_size, original_size, raw_image, dataset_name)
         else:
             # generate data for object detection
             if 'obj_list' in instance.keys():
                 prepare_for_dsam = self.generate_obj_list(instance, K, before_pad_size, original_size, raw_image, dataset_name)
-                
+
                 # random choose another frame
                 if len(prepare_for_dsam) == 0:
                     print(img_path)
@@ -383,6 +401,86 @@ class DetAny3DDataset(Dataset):
             # cv2.imwrite('3D_test_change_K.png', to_draw)
             # import ipdb; ipdb.set_trace()
             # print('stop here')
+
+        return prepare_for_dsam
+
+    def generate_oracle_list(self, instance, K, before_pad_size, original_size):
+        """Build prepare_for_dsam from a precomputed oracle-2D JSON.
+
+        Used at eval time when ``cfg.dataset.oracle_2d_input`` is True
+        (e.g. ovmono3d's gdino_WildBox_val_oracle_2d.json). Replaces the
+        model's natural 2D source with the precomputed boxes; the 3D
+        head still operates as normal.
+
+        The oracle JSON is keyed by image_id, which we look up via the
+        first object in the pickle entry (every record in the WildBox
+        val pickle has at least one GT obj, so this is safe).
+
+        3D fields are written as -1 placeholders -- this triggers
+        only_2d_mode at line 261 in train.py, which keeps the 3D head
+        running but skips 3D loss/metric computation against GT.
+        """
+        if not instance.get("obj_list"):
+            return []
+        image_id = instance["obj_list"][0]["image_id"]
+
+        entry = self.oracle_2d_by_image_id.get(int(image_id))
+        if entry is None:
+            return []
+
+        ds_id_to_contig = {
+            int(k): int(v)
+            for k, v in self.category_id["thing_dataset_id_to_contiguous_id"].items()
+        }
+
+        prepare_for_dsam = []
+        for inst in entry.get("instances", []):
+            ds_id = int(inst["category_id"])
+            if ds_id not in ds_id_to_contig:
+                continue
+            contig_id = ds_id_to_contig[ds_id]
+
+            # xywh -> xyxy in original-image coords.
+            x, y, w, h = inst["bbox"]
+            x2, y2 = x + w, y + h
+            bbox_xyxy = torch.tensor([x, y, x2, y2], dtype=torch.float32)
+
+            # Resize boxes to the SAM-resized image space, then clamp.
+            bbox_2d_tensor = self.sam_trans.apply_boxes_torch(
+                bbox_xyxy, original_size
+            ).to(torch.int).squeeze(0)
+            bbox_2d_tensor[0::2] = torch.clamp(
+                bbox_2d_tensor[0::2], min=0, max=before_pad_size[1]
+            )
+            bbox_2d_tensor[1::2] = torch.clamp(
+                bbox_2d_tensor[1::2], min=0, max=before_pad_size[0]
+            )
+
+            if (bbox_2d_tensor[2] - bbox_2d_tensor[0] < 1
+                    or bbox_2d_tensor[3] - bbox_2d_tensor[1] < 1):
+                continue
+
+            cx = int((bbox_2d_tensor[0] + bbox_2d_tensor[2]) / 2)
+            cy = int((bbox_2d_tensor[1] + bbox_2d_tensor[3]) / 2)
+            point_coords_tensor = torch.tensor([[cx, cy]], dtype=torch.int)
+            box_coords = bbox_2d_tensor.clone()
+
+            todo_dict = {
+                "bbox_2d": bbox_2d_tensor,
+                "point_coords": point_coords_tensor,
+                "boxes_coords": box_coords,
+                # No GT 3D at oracle eval time; placeholders trigger only_2d_mode.
+                "bbox_3d": torch.tensor([-1, -1, -1, -1, -1, -1, -1], dtype=torch.float32),
+                "center_2d": torch.tensor([-1, -1], dtype=torch.float32),
+                "instance_id": f"oracle_{image_id}_{len(prepare_for_dsam)}",
+            }
+            if self.cfg.output_rotation_matrix:
+                todo_dict["rotation_pose"] = torch.eye(3, dtype=torch.float32)
+            if self.cfg.add_cubercnn_for_ap_inference:
+                todo_dict["label"] = contig_id
+                todo_dict["score"] = float(inst.get("score", 1.0))
+                todo_dict["image_id"] = int(image_id)
+            prepare_for_dsam.append(todo_dict)
 
         return prepare_for_dsam
 

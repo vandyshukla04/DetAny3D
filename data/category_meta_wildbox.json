@@ -1,0 +1,18 @@
+{
+  "thing_classes": [
+    "giraffe",
+    "grevys_zebra",
+    "elephant",
+    "plains_zebra",
+    "rhino",
+    "gazelle"
+  ],
+  "thing_dataset_id_to_contiguous_id": {
+    "1000": 0,
+    "1001": 1,
+    "1002": 2,
+    "1003": 3,
+    "1004": 4,
+    "1005": 5
+  }
+}

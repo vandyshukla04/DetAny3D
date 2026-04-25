@@ -1,0 +1,150 @@
+# Wildbox eval -- oracle 2D mode (paper-protocol zero-shot AND fine-tuned eval).
+#
+# Replaces DetAny3D's GT-prompt with ovmono3d's precomputed
+# gdino_WildBox_val_oracle_2d.json -- the SAME oracle JSON every other
+# architecture in the cross-arch comparison consumes. See
+# ovmono3d/WILDBOX_EXPERIMENT.md §20.4 (the portable contract).
+#
+# Two ways to use this config (both via `tools/wildbox_smoke.sh` or
+# `tools/wildbox_final.sh`):
+#   1. Set `resume:` to the pretrained DetAny3D checkpoint -> zero-shot
+#      paper-protocol row.
+#   2. Set `resume:` to a fine-tuned checkpoint from wildbox_final.yaml ->
+#      fine-tuned eval. Same oracle JSON, same val pickle.
+
+batch_size: 1
+num_epochs: 1
+eval_interval: 1
+inference_only: True
+exp_dir: "./exps/wildbox_eval_oracle2d"
+resume: ./checkpoints/detany3d_ckpts/detany3d.pth   # OVERRIDE for fine-tuned eval
+resume_scheduler: False
+use_amp: False
+max_depth: 100
+
+add_cubercnn_for_ap_inference: True
+output_json_file: wildbox_oracle_preds
+
+tune_with_prompt: True
+inference_with_prompt: True
+tune_with_depth: False
+inference_with_depth: True
+
+provide_gt_intrinsics: True
+provide_gt_intrinsics_inference: True
+
+input_point_prompt: False
+inference_with_point_prompt: False
+input_box_prompt: True
+inference_with_box_prompt: True
+random_drop_prompt: False
+random_drop_prompt_prob: 0.0
+random_drop_depth_prompt_prob: 0.0
+
+inference_novel: True
+inference_basic: True
+
+output_rotation_matrix: True
+contain_edge_obj: False
+
+visualize_num: 5
+
+loss:
+  loss_list: []
+  depth: {coefficient: 0.15, depth_loss_weight: 5}
+  phi: {coefficient: 1, phi_loss_weight: 2.5}
+  theta: {coefficient: 1, theta_loss_weight: 2.5}
+
+unlock_all_backbone: false
+
+load_unidepth_ckpt: True
+dino_dim: 1024
+unidepth_path: './checkpoints/unidepth_ckpts/model.pth'
+dino_path: "./checkpoints/dino_ckpts/dinov2_vitl14_pretrain.pth"
+
+opt:
+  type: v3
+  learning_rate: 0.00001
+  min_learning_rate: 0.000000001
+  weight_decay: 0.0000001
+  warmup_steps: 0
+  unidepth_lr: 0.0000001
+  unidepth_weight_decay: 0.000000001
+
+model:
+  type: 'vit_h'
+  checkpoint: './checkpoints/sam_ckpts/sam_vit_h_4b8939.pth'
+  pad: 896
+  image_encoder:
+    img_size: 1024
+    patch_size: 16
+    in_chans: 3
+    embed_dim: 1280
+    depth: 32
+    num_heads: 16
+    mlp_ratio: 4.0
+    out_chans: 256
+    qkv_bias: True
+    norm_layer: nn.LayerNorm
+    act_layer: nn.GELU
+    use_abs_pos: True
+    use_rel_pos: True
+    rel_pos_zero_init: True
+    window_size: 14
+    global_attn_indexes: [7, 15, 23, 31]
+  prompt_encoder:
+  mask_decoder:
+    num_multimask_outputs: 3
+    type: MaskDecoder
+  freeze:
+    image_encoder: True
+    prompt_encoder: True
+    mask_decoder: True
+  additional_adapter: True
+  vit_pad_mask: True
+  original_sam: False
+  multi_level_box_output: 3
+
+dataset:
+  category_meta_path: './data/category_meta_wildbox.json'
+  generate_dino_oracle_list: False
+  dino_as_input: False
+  previous_metric: True
+  dino_oracle_input: False
+
+  # The oracle hook -- replaces GT/in-process-GDino prompts with the
+  # precomputed boxes loaded from this JSON. See generate_oracle_list()
+  # in detany3d_dataset.py.
+  oracle_2d_input: True
+  oracle_2d_path: './datasets/Omni3D/gdino_WildBox_val_oracle_2d.json'
+
+  zero_shot: True
+  zero_shot_dataset: False
+  clamp_bbox_2d: True
+  perturbation_point_prompt: False
+  perturbation_box_prompt: False
+  perturbation_factor: 0.0
+  num_point_prompts: 1
+  generate_point_prompts_via_mask: False
+  pixel_mean: [123.675, 116.28, 103.53]
+  pixel_std: [58.395, 57.12, 57.375]
+  max_dets: 50
+  hack_img_path: False
+  hack_point_prompt: False
+  hack_box_prompt: False
+  # train block is required by DetAny3D's data loader even in inference_only mode.
+  # Point at the val pickle so the train DataLoader builds (it never iterates).
+  train:
+    wildbox:
+      range: {begin: 0, end: -1, interval: 1}
+      max_distance: 100
+      min_distance: 0.01
+      metric_scale: 1.0
+      pkl_path: './data/pkls/wildbox/WildBox_val.pkl'
+  val:
+    wildbox:
+      range: {begin: 0, end: -1, interval: 1}
+      max_distance: 100
+      min_distance: 0.01
+      metric_scale: 1.0
+      pkl_path: './data/pkls/wildbox/WildBox_val.pkl'

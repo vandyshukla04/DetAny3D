@@ -12,6 +12,10 @@
 batch_size: 1
 num_epochs: 2
 eval_interval: 100000
+# Save a checkpoint every N iters mid-epoch (defense against SSH-disconnect
+# / preemption / NCCL-watchdog kills). End-of-epoch save happens regardless.
+# Set to 0 to disable.
+save_checkpoint_iters: 5000
 inference_only: False
 exp_dir: "./exps/wildbox_final"
 resume: ./checkpoints/detany3d_ckpts/detany3d.pth

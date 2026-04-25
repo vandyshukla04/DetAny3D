@@ -201,13 +201,32 @@ def train_one_epoch(
             cfg.scaler.scale(loss_total).backward()
             cfg.scaler.step(optimizer)
             cfg.scaler.update()
-            
+
             if cfg.writer and dist.get_rank() == 0:
                 for loss_name, loss_value in loss_dict.items():
                     cfg.writer.add_scalar(f'Train/{loss_name}', loss_value.item(), epoch * len(train_dataloader) + iter)
 
             if device_id == 0:
                 t.update(1)
+
+            # Periodic mid-epoch checkpoint so SSH-disconnect / preemption /
+            # NCCL-watchdog kills don't cost the entire epoch's compute. The
+            # current train.py only otherwise saves at end-of-epoch (line ~411).
+            # On resume, train.py reloads weights only (resume_scheduler=False
+            # in our wildbox configs), so retraining replays the epoch with
+            # the partially-trained state as warm-start -- not a perfect
+            # resume but recovers most of the lost compute.
+            save_iters = getattr(cfg, 'save_checkpoint_iters', 0)
+            if save_iters and (iter + 1) % save_iters == 0 and cfg.rank == 0:
+                save_checkpoint({
+                    'epoch': epoch,
+                    'iter': iter + 1,
+                    'state_dict': model.module.state_dict(),
+                    'optimizer': optimizer.state_dict(),
+                    'scheduler': scheduler.state_dict(),
+                    'scaler': cfg.scaler.state_dict(),
+                }, cfg.exp_dir, 'checkpoint_e{}_iter{:07d}.pth'.format(epoch, iter + 1))
+                logger.info("[mid-epoch ckpt] epoch={} iter={} saved".format(epoch, iter + 1))
 
     loss_epoch /= (iter + 1)
     dist.all_reduce(loss_epoch)

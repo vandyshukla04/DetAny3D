@@ -14,7 +14,7 @@ from torch.utils.data import Dataset, DataLoader
 from torch.utils.data.distributed import DistributedSampler
 from torch.nn.parallel import DistributedDataParallel as DDP
 import torch.distributed as dist
-from datetime import datetime
+from datetime import datetime, timedelta
 from box import Box
 from tqdm import tqdm
 import os
@@ -440,8 +440,14 @@ def trainval_sam(
 
 def main():
     os.environ['NCCL_DEBUG'] = 'INFO'
-    dist.init_process_group("nccl")
-    # dist.init_process_group("nccl", timeout=timedelta(seconds=7200000)) # was 1800000
+    # The default 30-min NCCL watchdog times out on the first ALLGATHER
+    # (SeqNum=1) when 4 ranks contend for /storage3 NFS during the first
+    # batch fetch -- one rank stragglers, the others wait, watchdog kills
+    # everyone. Upstream authors hit this too (see commented line below
+    # with a 2000-hour timeout). Use 4 hours as a sane safety margin --
+    # if any rank legitimately takes > 4h between collective ops, there's
+    # a real bug worth surfacing.
+    dist.init_process_group("nccl", timeout=timedelta(hours=4))
     os.environ['NCCL_BLOCKING_WAIT'] = '0'  # not to enforce timeout
 
     rank = dist.get_rank()

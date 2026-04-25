@@ -10,7 +10,7 @@
 # multi-GPU if needed.
 
 batch_size: 1
-num_epochs: 3
+num_epochs: 2
 eval_interval: 100000
 inference_only: False
 exp_dir: "./exps/wildbox_final"

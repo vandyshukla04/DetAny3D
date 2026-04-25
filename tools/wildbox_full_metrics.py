@@ -131,17 +131,37 @@ def main(argv=None):
     import torch
     preds_per_image = torch.load(str(args.predictions), weights_only=False, map_location="cpu")
 
+    # Build a contiguous -> dataset_id map from the GT category list.
+    # WildBox stores dataset_ids 1000..1005 in the JSON; our exporter writes
+    # category_id as contiguous 0..5 (matching DetAny3D's training-time
+    # label space). The COCOEvaluator subclass needs dataset_ids; remap.
+    gt_cat_ids = sorted(omni_gt.getCatIds())  # ascending dataset_ids
+    contiguous_to_dataset = {i: cid for i, cid in enumerate(gt_cat_ids)}
+    logger.info(f"contiguous -> dataset_id map: {contiguous_to_dataset}")
+
     omni_results = []
     n_skipped_score = 0
+    n_skipped_unknown_cat = 0
     for entry in preds_per_image:
         for inst in entry.get("instances", []):
             if inst.get("score", inst.get("score_3d", 1.0)) < args.score_min:
                 n_skipped_score += 1
                 continue
-            omni_results.append(_normalise_instance(inst))
+            normalised = _normalise_instance(inst)
+            cid = normalised["category_id"]
+            if cid in contiguous_to_dataset:
+                normalised["category_id"] = contiguous_to_dataset[cid]
+            elif cid in gt_cat_ids:
+                # already a dataset_id (someone else's exporter); leave alone
+                pass
+            else:
+                n_skipped_unknown_cat += 1
+                continue
+            omni_results.append(normalised)
     logger.info(f"loaded {len(omni_results)} predictions across "
-                f"{len(preds_per_image)} images (skipped {n_skipped_score} "
-                f"by score threshold)")
+                f"{len(preds_per_image)} images "
+                f"(skipped {n_skipped_score} by score threshold, "
+                f"{n_skipped_unknown_cat} by unknown category)")
 
     if not omni_results:
         print("ERROR: no predictions remain after score threshold; aborting", file=sys.stderr)

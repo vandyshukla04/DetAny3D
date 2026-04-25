@@ -228,12 +228,18 @@ class DetAny3DDataset(Dataset):
             if 'obj_list' in instance.keys():
                 prepare_for_dsam = self.generate_obj_list(instance, K, before_pad_size, original_size, raw_image, dataset_name)
 
-                # random choose another frame
+                # The original code's comment said "random choose another
+                # frame" but the implementation just set prepare_for_dsam = []
+                # and returned the empty sample, which then crashed
+                # train_one_epoch's backward (loss_total stayed as Python int 0
+                # -> 0.backward() raises). Recurse to a random sample to
+                # actually skip frames where filter_objects rejects every box
+                # (e.g. animals with their 3D-cuboid centers projecting
+                # off-screen at frame edges).
                 if len(prepare_for_dsam) == 0:
                     print(img_path)
                     print('Warning: no valid object detected, return another sample')
-
-                    prepare_for_dsam = []
+                    return self.__getitem__(random.randint(0, self.idx_cum[-1] - 1))
             else:
                 prepare_for_dsam = []
             

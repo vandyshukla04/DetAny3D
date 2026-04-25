@@ -500,7 +500,13 @@ def main():
         assert os.path.isfile(cfg.resume)
         logger.info("=> loading checkpoint '{}'".format(cfg.resume))
         checkpoint = torch.load(cfg.resume, map_location=f'cuda:{device_id}')
-        start_epoch = checkpoint['epoch']
+        # The released DetAny3D checkpoint stores epoch=93. If we resume into
+        # inference-only or a fresh fine-tune with cfg.num_epochs<=93, the
+        # outer loop range(start_epoch, num_epochs) becomes empty and the
+        # job exits without running anything. Mirror ovmono3d's same fix
+        # (see ovmono3d/WILDBOX_EXPERIMENT.md §3.1.1) and reset to 0 when
+        # not continuing a prior training run.
+        start_epoch = 0 if cfg.inference_only else checkpoint['epoch']
         new_model_dict = my_sam_model.state_dict()
         for k,v in new_model_dict.items():
             if k in checkpoint['state_dict'].keys() and checkpoint['state_dict'][k].size() == new_model_dict[k].size():

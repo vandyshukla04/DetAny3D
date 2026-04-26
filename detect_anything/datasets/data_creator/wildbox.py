@@ -220,7 +220,15 @@ def convert(
 
         obj_list = []
         for ann in anns_by_image.get(img["id"], []):
-            ds_id = ann.get("dataset_id", ann.get("category_id"))
+            # ovmono3d's WildBox JSON uses 'dataset_id' as the dataset-collection
+            # id (uniformly 1000 across all annotations) and 'category_id' as the
+            # per-annotation species id (1000-1005). We want the per-annotation
+            # species id, so prefer category_id and fall back to dataset_id only
+            # if category_id is missing. The earlier (reversed) order silently
+            # collapsed all per-annotation labels to giraffe, which broke the
+            # GT-2D ceiling row's per-class metrics. (Other rows used the oracle
+            # JSON's category_id directly and were unaffected.)
+            ds_id = ann.get("category_id", ann.get("dataset_id"))
             if ds_id not in id_to_contig:
                 anns_dropped_filter += 1
                 continue

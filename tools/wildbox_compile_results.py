@@ -226,6 +226,23 @@ def render_results_md(zs: dict, ft: dict, ft_label: str) -> str:
                     val = bucket.get("IoU=" + nested_path[1]) or bucket.get(nested_path[1])
                     if val is not None:
                         return val
+            # Fallback: derive macro/micro from per_class.
+            # per_class is {species: {"IoU=0.25": v, "IoU=0.50": v}}.
+            agg, iou = nested_path if len(nested_path) == 2 else (None, None)
+            if agg in ("macro", "micro") and iou:
+                pc = bev.get("per_class", {}) or {}
+                vals = []
+                for sp, perclass in pc.items():
+                    v = perclass.get(f"IoU={iou}")
+                    if v is not None and v >= 0:
+                        vals.append(v)
+                if vals:
+                    if agg == "macro":
+                        return sum(vals) / len(vals)
+                    # "micro" can't be re-derived from per-class without
+                    # per-instance TP/FP counts. Approximate by macro and
+                    # flag in the cell name; better: skip and let the
+                    # cell render "—".
         return None
 
     pairs = [

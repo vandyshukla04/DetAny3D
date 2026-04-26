@@ -165,6 +165,10 @@ def audit_pickle(pkl_path: Path, gt_json: dict, label: str) -> dict:
         else:
             _fail(f"dimensions reversal failed for "
                   f"{n_dim_check - n_dim_match}/{n_dim_check} sampled annotations")
+    else:
+        _info("dim-reversal check skipped (no matching ann_ids found in the "
+              "GT JSON passed for this pickle; pass the right --gt-json / "
+              "--train-gt-json to enable)")
 
     # depth_path should be None for all records (synthetic-scale GT, no metric depth).
     n_with_depth = sum(1 for r in pkl if r.get("depth_path") is not None)
@@ -470,6 +474,10 @@ def main(argv: Optional[List[str]] = None) -> int:
     ap.add_argument("--pkl-val", type=Path, required=True)
     ap.add_argument("--gt-json", type=Path, required=True,
                     help="ovmono3d's WildBox_val.json")
+    ap.add_argument("--train-gt-json", type=Path, default=None,
+                    help="ovmono3d's WildBox_train.json. Optional but required "
+                         "for the dim-reversal check on the train pickle (since "
+                         "train and val annotation IDs are independently 0-indexed).")
     ap.add_argument("--oracle", type=Path, required=True,
                     help="ovmono3d's gdino_WildBox_val_oracle_2d.json")
     ap.add_argument("--category-meta", type=Path,
@@ -489,7 +497,17 @@ def main(argv: Optional[List[str]] = None) -> int:
     _info(f"  GT: {len(gt_json.get('images', []))} images, "
           f"{len(gt_json.get('annotations', []))} annotations")
 
-    pkl_train = audit_pickle(args.pkl_train, gt_json, "train")
+    if args.train_gt_json:
+        print("\nLoading WildBox_train.json (this may take a few seconds)...")
+        train_gt_json = json.loads(args.train_gt_json.read_text())
+        _info(f"  TRAIN GT: {len(train_gt_json.get('images', []))} images, "
+              f"{len(train_gt_json.get('annotations', []))} annotations")
+    else:
+        train_gt_json = None
+        print("\n(skipping train-pickle dim-reversal check — pass --train-gt-json "
+              "to enable; not strictly needed if val passed since same converter)")
+
+    pkl_train = audit_pickle(args.pkl_train, train_gt_json or {"annotations": []}, "train")
     pkl_val = audit_pickle(args.pkl_val, gt_json, "val")
     audit_train_val_leak(pkl_train, pkl_val)
     audit_oracle(args.oracle, pkl_val, meta)

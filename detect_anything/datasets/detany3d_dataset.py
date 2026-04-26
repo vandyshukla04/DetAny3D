@@ -290,7 +290,21 @@ class DetAny3DDataset(Dataset):
             if self.cfg.output_rotation_matrix:
                 pose = obj['rotation_pose']
             vertices_3d, fore_plane_center_3d = compute_3d_bbox_vertices(x, y, z, w, h, l, yaw, pose)
-            if '2d_bbox_proj' in obj.keys() and obj['2d_bbox_proj'] != [-1, -1, -1, -1] and not self.cfg.add_cubercnn_for_ap_inference:
+            # Upstream: at AP-inference time, the loose 3D-cuboid-projection 2D
+            # is preferred (so 2D and 3D AP are computed against the same box).
+            # For WildBox we have *tight* SAM3 2D boxes in obj['2d_bbox_proj']
+            # which are the right input under the GT-2D ceiling protocol; the
+            # loose projection box collapses 2D AP (~12.85 -> ~1.19).
+            # `cfg.dataset.prefer_2d_bbox_proj_at_inference: True` (set in
+            # the wildbox eval-gt2d config) bypasses the upstream override and
+            # uses the tight box even when add_cubercnn_for_ap_inference=True.
+            _prefer_proj = getattr(self.cfg.dataset, 'prefer_2d_bbox_proj_at_inference', False)
+            _use_proj_2d = (
+                '2d_bbox_proj' in obj.keys()
+                and obj['2d_bbox_proj'] != [-1, -1, -1, -1]
+                and (_prefer_proj or not self.cfg.add_cubercnn_for_ap_inference)
+            )
+            if _use_proj_2d:
                 bbox_2d_tensor = torch.tensor(obj['2d_bbox_proj'], dtype=torch.int)
                 if self.cfg.dataset[self.mode][dataset_name].get("xywl_mode", False):
                     bbox_2d_tensor[2] += bbox_2d_tensor[0]

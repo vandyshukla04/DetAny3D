@@ -324,6 +324,22 @@ def validate_one_epoch(
                         dict_i['bbox'][2] = dict_i['bbox'][2] - dict_i['bbox'][0]
                         dict_i['bbox'][3] = dict_i['bbox'][3] - dict_i['bbox'][1]
                         dict_i['category_id'] = data['prepare_for_dsam'][i]['label']
+                        # [DBG-GT2D] one-shot live label trace at export point.
+                        # Confirms whether labels reaching JSON are actually
+                        # diverse or collapsed to a single class. Prints first
+                        # 80 (image_id, label) pairs and a running tally.
+                        if not hasattr(validate_one_epoch, '_dbg_state'):
+                            validate_one_epoch._dbg_state = {'n': 0, 'tally': {}}
+                        _st = validate_one_epoch._dbg_state
+                        _lab = int(dict_i['category_id'])
+                        _st['tally'][_lab] = _st['tally'].get(_lab, 0) + 1
+                        if _st['n'] < 80:
+                            print(f"[DBG-GT2D export] iter={iter} obj_i={i} "
+                                  f"image_id={dict_i['image_id']} "
+                                  f"category_id={_lab} "
+                                  f"raw_label={data['prepare_for_dsam'][i]['label']!r} "
+                                  f"running_tally={_st['tally']}", flush=True)
+                            _st['n'] += 1
                         dict_i['score'] = data['prepare_for_dsam'][i]['score']
                         dict_i['depth'] = decoded_bboxes_pred_3d[i, 2].cpu().numpy().tolist()
                         dict_i['bbox3D'] = decoded_bboxes_pred_3d_corners_for_cubercnn[i].cpu().numpy().tolist()

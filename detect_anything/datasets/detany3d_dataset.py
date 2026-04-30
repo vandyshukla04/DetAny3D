@@ -851,6 +851,13 @@ class DetAny3DDataset(Dataset):
                 TEXT_PROMPT += "pedestrian . car . cyclist . "
         if 'kit_leaderboard' in dataset_name:
             TEXT_PROMPT += "car . "
+        if 'wildbox' in dataset_name:
+            # Text-prompted open-vocab inference: feed the 6 WildBox species as
+            # GroundingDINO text prompts. Names must match category_meta_wildbox.json
+            # exactly (closed-vocab argmax in `prepare_for_dsam` checks
+            # `phrases[i] in thing_classes`).
+            if self.cfg.inference_basic:
+                TEXT_PROMPT += "giraffe . grevys_zebra . elephant . plains_zebra . rhino . gazelle . "
         # import ipdb; ipdb.set_trace()
 
         check_label = TEXT_PROMPT.split(' . ')

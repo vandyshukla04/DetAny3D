@@ -97,9 +97,9 @@ model:
     num_multimask_outputs: 3
     type: MaskDecoder
   freeze:
-    image_encoder: True
-    prompt_encoder: True
-    mask_decoder: True
+    image_encoder: False
+    prompt_encoder: False
+    mask_decoder: False
   additional_adapter: True
   vit_pad_mask: True
   original_sam: False

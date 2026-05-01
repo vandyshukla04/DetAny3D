@@ -1,34 +1,36 @@
 """
 Wildbox cross-architecture composite panel — paper-figure version.
 
+PORTS the OVMono3D `visualize_class_agnostic.py` rendering primitives
+(`novel_view_panel`, `draw_3d_wireframe`, `cuboid_corners`, `euler2mat`)
+verbatim, with the SINGLE modification of swapping per-instance hue
+coloring for per-class coloring (so the same species is the same color
+across architectures, not a different random hue per detection).
+
 Layout (per image):
-  Row 1 (zero-shot):  [arch1: img+3D + BEV] [arch2: img+3D + BEV] ...
-  Row 2 (fine-tuned): [arch1: img+3D + BEV] [arch2: img+3D + BEV] ...
+  Row 1 (zero-shot):  [arch1 cell] [arch2 cell] ...
+  Row 2 (fine-tuned): [arch1 cell] [arch2 cell] ...
 
-The 2D-only row was removed (it was awkwardly placed). Each cell is
-img-with-3D-wireframe paired with a BEV mini next to it.
+  Each cell = [3D wireframe on input image] + [novel-view (60° pitch)
+              with ground-plane grid + cuboid wireframes]
 
-Fixed 6-species palette so the same color = same species across all archs.
-Box edges have a black stroke for visibility against varied backgrounds.
+The 2D-only panel was dropped per user request. Cell labels at the top
+of each cell, vertical row labels (ZS / FT) on the left.
 
-CLI uses '<row> / <label>=path' to assign each prediction file to a row:
-  --col "ZS / OVMono3D-LIFT=output/.../instances_predictions.pth"
+CLI uses '<row> / <label>=path':
+  --col "ZS / OVMono3D-LIFT=...pth"
   --col "ZS / DetAny3D=...pth"
   --col "FT / OVMono3D-LIFT init5sp=...pth"
   --col "FT / DetAny3D FT 2ep=...pth"
 
-Row-label canonicalisation: strings starting with 'ZS' or 'Zero-shot' go to
-the top row; 'FT' or 'Fine-tuned' → bottom. Other strings are taken as-is
-and grouped lexicographically.
-
-Usage example:
-  python tools/wildbox_compose_panel.py \
-      --gt   datasets/Omni3D/WildBox_val.json \
-      --out  output/wildbox_panels \
-      --col  "ZS / OVMono3D-LIFT=output/wl6_zeroshot_oracle2d/inference/iter_final/WildBox_val/instances_predictions.pth" \
-      --col  "ZS / DetAny3D=output/wildbox_detany3d_zs_int1_v3/inference/iter_final/WildBox_val/instances_predictions.pth" \
-      --col  "FT / OVMono3D-LIFT init5sp=output/wl6_init5sp_multiseed/seed0/eval/inference/iter_final/WildBox_val/instances_predictions.pth" \
-      --col  "FT / DetAny3D FT 2ep=output/wildbox_detany3d_ft_ep2_seed0_int1_v3/inference/iter_final/WildBox_val/instances_predictions.pth" \
+Run:
+  python tools/wildbox_compose_panel.py \\
+      --gt   datasets/Omni3D/WildBox_val.json \\
+      --out  output/wildbox_panels \\
+      --col  "ZS / OVMono3D-LIFT=...pth" \\
+      --col  "ZS / DetAny3D=...pth" \\
+      --col  "FT / OVMono3D-LIFT init5sp=...pth" \\
+      --col  "FT / DetAny3D FT 2ep=...pth" \\
       --every 200 --limit 80 --score-min 0.05 --max-dets 12
 """
 from __future__ import annotations
@@ -40,25 +42,32 @@ from collections import defaultdict
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
+import cv2
 import numpy as np
 import torch
-from PIL import Image, ImageDraw, ImageFont
 
 
-# Fixed class palette (RGB). Same colors across all arches.
+# Fixed class palette in BGR (cv2 convention). Same colors across all archs.
 CLASSES = ["giraffe", "grevys_zebra", "elephant", "plains_zebra", "rhino", "gazelle"]
-PALETTE = {
-    "giraffe":      (235,  90,  90),    # red
-    "grevys_zebra": (245, 165,  60),    # orange
-    "elephant":     ( 75, 130, 220),    # blue
-    "plains_zebra": (240, 210,  60),    # yellow
-    "rhino":        (140, 140, 150),    # gray
-    "gazelle":      ( 90, 190, 110),    # green
+PALETTE_BGR = {
+    "giraffe":      ( 90,  90, 235),    # red
+    "grevys_zebra": ( 60, 165, 245),    # orange
+    "elephant":     (220, 130,  75),    # blue
+    "plains_zebra": ( 60, 210, 240),    # yellow
+    "rhino":        (150, 140, 140),    # gray
+    "gazelle":      (110, 190,  90),    # green
 }
 DATASET_ID_TO_CONTIG = {1000+i: i for i in range(6)}
 
 
-# Row ordering: ZS row above FT row.
+def class_color_bgr(category_id: int) -> Tuple[int, int, int]:
+    contig = DATASET_ID_TO_CONTIG.get(category_id, category_id)
+    if 0 <= contig < len(CLASSES):
+        return PALETTE_BGR[CLASSES[contig]]
+    return (180, 180, 180)
+
+
+# --- Row ordering ---
 ROW_ORDER = ["ZS", "FT", "OTHER"]
 
 
@@ -71,352 +80,450 @@ def canonical_row(label: str) -> str:
     return "OTHER"
 
 
-# ---------- 3D cuboid corners and projection ----------
+# =====================================================================
+# PORT: ovmono3d/tools/visualize_class_agnostic.py — geometry primitives
+# =====================================================================
 
-def cuboid_corners_cam(center_cam: np.ndarray,
-                       dims_cam: Tuple[float, float, float],
-                       R_cam: np.ndarray) -> np.ndarray:
-    """8 corners of a 3D cuboid in camera coords.
+def euler2mat(euler):
+    """Same as cubercnn.util.math_util.euler2mat."""
+    rx = np.array([[1, 0, 0],
+                   [0, math.cos(euler[0]), -math.sin(euler[0])],
+                   [0, math.sin(euler[0]),  math.cos(euler[0])]])
+    ry = np.array([[math.cos(euler[1]), 0, math.sin(euler[1])],
+                   [0, 1, 0],
+                   [-math.sin(euler[1]), 0, math.cos(euler[1])]])
+    rz = np.array([[math.cos(euler[2]), -math.sin(euler[2]), 0],
+                   [math.sin(euler[2]),  math.cos(euler[2]), 0],
+                   [0, 0, 1]])
+    return rz @ ry @ rx
 
-    Omni3D convention: dims=(W, H, L). Local cuboid centered at origin,
-    extents (±W/2, ±H/2, ±L/2) along local axes; rotated by R_cam, then
-    translated to center_cam. Returns shape (8, 3).
-    """
-    W, H, L = float(dims_cam[0]), float(dims_cam[1]), float(dims_cam[2])
+
+def project(points3d: np.ndarray, K: np.ndarray) -> np.ndarray:
+    xs = points3d[:, 0] / points3d[:, 2]
+    ys = points3d[:, 1] / points3d[:, 2]
+    u = K[0, 0] * xs + K[0, 2]
+    v = K[1, 1] * ys + K[1, 2]
+    return np.stack([u, v], axis=1)
+
+
+def cuboid_corners(center, dims_whl, R):
+    """Omni3D corner ordering: L=X-ext, H=Y-ext, W=Z-ext."""
+    W, H, L = float(dims_whl[0]), float(dims_whl[1]), float(dims_whl[2])
     local = np.array([
-        [-L/2, -H/2, -W/2],
-        [+L/2, -H/2, -W/2],
-        [+L/2, -H/2, +W/2],
-        [-L/2, -H/2, +W/2],
-        [-L/2, +H/2, -W/2],
-        [+L/2, +H/2, -W/2],
-        [+L/2, +H/2, +W/2],
-        [-L/2, +H/2, +W/2],
+        [-L/2, -H/2, -W/2], [+L/2, -H/2, -W/2],
+        [+L/2, +H/2, -W/2], [-L/2, +H/2, -W/2],
+        [-L/2, -H/2, +W/2], [+L/2, -H/2, +W/2],
+        [+L/2, +H/2, +W/2], [-L/2, +H/2, +W/2],
     ], dtype=np.float64)
-    R = np.asarray(R_cam, dtype=np.float64)
-    if R.shape == (9,): R = R.reshape(3, 3)
-    if R.shape != (3, 3): R = np.eye(3)
-    rotated = local @ R.T
-    return rotated + np.asarray(center_cam, dtype=np.float64)
+    return (R @ local.T).T + np.asarray(center, dtype=np.float64)
 
 
-def project(K: np.ndarray, points_cam: np.ndarray) -> np.ndarray:
+# Edge list used by cubercnn's draw_3d_box_from_verts
+BB3D_EDGES = [[0, 1], [1, 2], [2, 3], [3, 0],
+              [1, 5], [5, 6], [6, 2], [4, 5],
+              [4, 7], [6, 7], [0, 4], [3, 7]]
+
+
+def draw_3d_wireframe(im, K, verts3d, color, thickness,
+                     zplane=0.05, eps=1e-4):
+    """Same behavior as cubercnn.vis.vis.draw_3d_box_from_verts: clips edges
+    that cross the camera plane so lines project sensibly."""
     K = np.asarray(K, dtype=np.float64)
-    if K.shape == (9,): K = K.reshape(3, 3)
-    pts_h = (K @ points_cam.T).T
-    z = np.maximum(pts_h[:, 2:3], 1e-6)
-    return pts_h[:, :2] / z
+    v = np.asarray(verts3d, dtype=np.float64)
+    for (i, j) in BB3D_EDGES:
+        v0 = v[i].copy()
+        v1 = v[j].copy()
+        z0, z1 = v0[-1], v1[-1]
+        if z0 >= zplane or z1 >= zplane:
+            s = (zplane - z0) / max((z1 - z0), eps)
+            new_v = v0 + s * (v1 - v0)
+            if z0 < zplane <= z1:
+                v0 = new_v
+            elif z1 < zplane <= z0:
+                v1 = new_v
+            p0 = (K @ v0) / max(v0[-1], eps)
+            p1 = (K @ v1) / max(v1[-1], eps)
+            cv2.line(im,
+                     (int(p0[0]), int(p0[1])),
+                     (int(p1[0]), int(p1[1])),
+                     color, thickness, cv2.LINE_AA)
 
 
-CUBOID_EDGES = [
-    (0,1),(1,2),(2,3),(3,0),    # bottom
-    (4,5),(5,6),(6,7),(7,4),    # top
-    (0,4),(1,5),(2,6),(3,7),    # vertical
-]
-# Front-face edges (drawn thicker / with cross to indicate front)
-FRONT_FACE_EDGES = [(0,1),(1,5),(5,4),(4,0)]    # +X face for L-axis convention
+def _draw_label(canvas, xy, text, color, font_scale=0.6):
+    (tw, th), bl = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX,
+                                   font_scale, 2)
+    x = max(0, int(xy[0]))
+    y = max(int(xy[1]), th + 4)
+    cv2.rectangle(canvas, (x, y - th - 4), (x + tw + 4, y + bl),
+                  color, -1)
+    cv2.putText(canvas, text, (x + 2, y - 4),
+                cv2.FONT_HERSHEY_SIMPLEX, font_scale,
+                (255, 255, 255), 2)
 
 
-def draw_3d_wireframe(draw: ImageDraw.ImageDraw, corners_2d: np.ndarray,
-                      color: Tuple[int,int,int], line_width: int = 3,
-                      stroke_width: int = 1):
-    """Draw 3D cuboid wireframe with a black stroke under each line for contrast."""
-    # Black stroke layer (under)
-    if stroke_width > 0:
-        for a, b in CUBOID_EDGES:
-            ax, ay = corners_2d[a]; bx, by = corners_2d[b]
-            draw.line([(ax, ay), (bx, by)], fill=(0, 0, 0),
-                      width=line_width + 2 * stroke_width)
-    # Color layer (over)
-    for a, b in CUBOID_EDGES:
-        ax, ay = corners_2d[a]; bx, by = corners_2d[b]
-        draw.line([(ax, ay), (bx, by)], fill=color, width=line_width)
+# =====================================================================
+# Front-view (image with 3D cuboid wireframes overlaid)
+# =====================================================================
 
-
-# ---------- BEV ----------
-
-def render_bev(boxes: List[dict], canvas_size=(280, 280),
-               x_range=(-15, 15), z_range=(0, 30)) -> Image.Image:
-    """Top-down (x, z) view. Camera at origin (bottom-center), +z forward (up).
-
-    Box rectangle convention (matches Omni3D dims=(W, H, L)):
-      - Width W extends along the local x-axis (lateral)
-      - Length L extends along the local z-axis (depth)
-    yaw rotates the rectangle around the vertical (Y) axis.
-    """
-    W_canvas, H_canvas = canvas_size
-    img = Image.new("RGB", (W_canvas, H_canvas), (245, 245, 248))
-    draw = ImageDraw.Draw(img)
-
-    def world_to_canvas(x, z):
-        # x grows left→right; z grows bottom→top (camera at bottom looking up)
-        u = (x - x_range[0]) / (x_range[1] - x_range[0]) * W_canvas
-        v = H_canvas - (z - z_range[0]) / (z_range[1] - z_range[0]) * H_canvas
-        return (u, v)
-
-    # Background grid every 5 m in x and z
-    for gx in range(int(math.ceil(x_range[0] / 5)) * 5,
-                    int(math.floor(x_range[1] / 5)) * 5 + 1, 5):
-        u, _ = world_to_canvas(gx, z_range[0])
-        col = (200, 200, 210) if gx == 0 else (220, 220, 228)
-        draw.line([(u, 0), (u, H_canvas)], fill=col, width=1)
-    for gz in range(int(math.ceil(z_range[0] / 5)) * 5,
-                    int(math.floor(z_range[1] / 5)) * 5 + 1, 5):
-        _, v = world_to_canvas(0, gz)
-        col = (200, 200, 210)
-        draw.line([(0, v), (W_canvas, v)], fill=col, width=1)
-
-    # Camera at world origin (0, 0)
-    cu, cv = world_to_canvas(0, 0)
-    # Camera triangle (FOV indicator pointing up = +z forward)
-    fov_half = math.radians(35)
-    far_z = z_range[1]
-    far_left  = world_to_canvas(-far_z * math.tan(fov_half), far_z)
-    far_right = world_to_canvas(+far_z * math.tan(fov_half), far_z)
-    draw.polygon([(cu, cv), far_left, far_right], fill=(252, 252, 255), outline=(180, 180, 195))
-    draw.ellipse([cu-4, cv-4, cu+4, cv+4], fill=(50, 50, 60))
-
-    # Boxes — rotated rectangles
-    for b in boxes:
-        cx, cz = b["x"], b["z"]
-        bw, bl = b["W"], b["L"]
-        yaw = b.get("yaw", 0.0)
-        c, s = math.cos(yaw), math.sin(yaw)
-        # Local rectangle: x extent = W (lateral), z extent = L (depth)
-        local = np.array([
-            [-bw/2, -bl/2],   # back-left
-            [+bw/2, -bl/2],   # back-right
-            [+bw/2, +bl/2],   # front-right
-            [-bw/2, +bl/2],   # front-left
-        ])
-        rot = np.array([[c, -s], [s, c]])
-        world = local @ rot.T + np.array([cx, cz])
-        canv = [world_to_canvas(x, z) for x, z in world]
-        # Black stroke + color fill outline for visibility
-        draw.polygon(canv, outline=(0, 0, 0), width=4)
-        draw.polygon(canv, outline=b["color"], width=2)
-        # Front-edge highlight (thicker on the front face — between corners 2,3 = front-left/right)
-        front_a = canv[2]; front_b = canv[3]
-        draw.line([front_a, front_b], fill=b["color"], width=3)
-
-    # Labels along axes
-    try:
-        font = ImageFont.truetype("DejaVuSans.ttf", 10)
-    except (OSError, IOError):
-        font = ImageFont.load_default()
-    draw.text((4, H_canvas - 12), f"x∈[{x_range[0]},{x_range[1]}] z∈[{z_range[0]},{z_range[1]}] m",
-              fill=(80, 80, 90), font=font)
-    draw.text((W_canvas - 30, 4), "+z", fill=(60, 60, 80), font=font)
-    return img
-
-
-# ---------- IO ----------
-
-def load_predictions(path: Path) -> Dict[int, List[dict]]:
-    preds = torch.load(path, weights_only=False, map_location="cpu")
-    out = {}
-    for entry in preds:
-        out[int(entry["image_id"])] = entry.get("instances", [])
+def draw_3d_front_panel(base, instances, K, thickness):
+    """Image with per-class-colored 3D cuboid wireframes overlaid."""
+    out = base.copy()
+    font = max(0.5, out.shape[0] / 1000.0)
+    # Depth-sort: far first, so near ones end up on top
+    order = sorted(
+        range(len(instances)),
+        key=lambda i: -(instances[i]["corners3d"].mean(0)[2]
+                        if instances[i]["corners3d"] is not None else -1e9),
+    )
+    for i in order:
+        inst = instances[i]
+        c = inst["corners3d"]
+        if c is None:
+            continue
+        color = inst["color_bgr"]
+        draw_3d_wireframe(out, K, c, color, thickness)
+        if c[4, 2] > 0:
+            p = project(c[4:5], K)[0]
+            _draw_label(out, (p[0], p[1]), inst.get("label", "?"),
+                        color, font_scale=font)
     return out
 
 
-def load_gt_index(gt_json_path: Path) -> Tuple[Dict[int, dict], Dict[int, list]]:
-    gt = json.loads(gt_json_path.read_text())
-    image_meta = {}
-    for im in gt["images"]:
-        image_meta[int(im["id"])] = {
-            "width": int(im["width"]),
-            "height": int(im["height"]),
-            "K": im.get("K"),
-            "file_path": im.get("file_path"),
-        }
-    gt_anns = {}
-    for ann in gt["annotations"]:
-        img_id = int(ann["image_id"])
-        gt_anns.setdefault(img_id, []).append(ann)
-    return image_meta, gt_anns
+# =====================================================================
+# Novel-view panel — VERBATIM port from visualize_class_agnostic.py
+# (only change: per-instance color comes from the inst dict, not _color_for)
+# =====================================================================
 
-
-def class_color(category_id: int) -> Tuple[int, int, int]:
-    contig = DATASET_ID_TO_CONTIG.get(category_id, category_id)
-    if 0 <= contig < len(CLASSES):
-        return PALETTE[CLASSES[contig]]
-    return (180, 180, 180)
-
-
-# ---------- Per-cell rendering ----------
-
-def render_cell(image_path: Optional[Path], K: np.ndarray, image_size: Tuple[int, int],
-                instances: List[dict], score_min: float,
-                max_dets: int = 12) -> Tuple[Image.Image, Image.Image]:
-    """Return (img_with_3d_wireframe, bev_mini)."""
-    selected = [it for it in instances if float(it.get("score", 1.0)) >= score_min]
-    selected = sorted(selected, key=lambda it: -float(it.get("score", 1.0)))[:max_dets]
-
-    if image_path and image_path.exists():
-        try:
-            base = Image.open(image_path).convert("RGB")
-        except Exception:
-            base = Image.new("RGB", image_size, (220, 220, 220))
-    else:
-        base = Image.new("RGB", image_size, (220, 220, 220))
-
-    img_3d = base.copy()
-    d3d = ImageDraw.Draw(img_3d)
-
-    bev_boxes = []
-    for it in selected:
-        cid = int(it.get("category_id", 0))
-        color = class_color(cid)
-
-        bbox3d_cam = it.get("bbox3D_cam") or it.get("bbox3D")
-        center_cam = it.get("center_cam")
-        dims = it.get("dimensions")
-        pose = it.get("pose")
-
-        # 3D wireframe
-        if bbox3d_cam and len(bbox3d_cam) == 8:
-            corners3d = np.asarray(bbox3d_cam, dtype=np.float64)
-        elif center_cam and dims and pose:
-            corners3d = cuboid_corners_cam(np.asarray(center_cam), dims, np.asarray(pose))
-        else:
-            continue
-
-        if K is not None:
-            corners2d = project(K, corners3d)
-            draw_3d_wireframe(d3d, corners2d, color, line_width=3, stroke_width=1)
-
-        # BEV record
-        if center_cam and dims:
-            yaw = 0.0
-            R = None
-            if isinstance(pose, list):
-                arr = np.asarray(pose, dtype=np.float64)
-                if arr.shape == (3, 3):
-                    R = arr
-                elif arr.shape == (9,):
-                    R = arr.reshape(3, 3)
-                elif arr.ndim == 2 and arr.shape == (3, 3):
-                    R = arr
-            if R is not None:
-                yaw = math.atan2(R[0, 2], R[2, 2])
-            W_, _, L_ = float(dims[0]), float(dims[1]), float(dims[2])
-            bev_boxes.append({
-                "x": float(center_cam[0]),
-                "z": float(center_cam[2]),
-                "W": W_, "L": L_, "yaw": yaw, "color": color,
-            })
-
-    bev = render_bev(bev_boxes)
-    return img_3d, bev
-
-
-# ---------- Composite layout ----------
-
-def compose_panel(rows: Dict[str, List[Tuple[str, Image.Image, Image.Image]]],
-                  cell_h: int = 380, label_h: int = 26, gap: int = 6,
-                  row_label_w: int = 28) -> Image.Image:
-    """Layout:
-
-      [row label "ZS"] | col1: img-3D + BEV | col2: img-3D + BEV | ...
-      [row label "FT"] | col1: img-3D + BEV | col2: img-3D + BEV | ...
-
-    Each cell label sits ABOVE the cell. Each cell pair = (image-with-3D, BEV)
-    side by side. row_label is a thin vertical band on the left of each row.
+def novel_view_panel(K, im_shape, instances, out_size,
+                     pitch_rad=math.pi / 3,
+                     with_grid=True,
+                     thickness=4,
+                     bg=(245, 245, 245),
+                     grid_color=(175, 175, 175)):
+    """Render cuboid wireframes from a novel viewpoint rotated by pitch_rad
+    about the scene center. Optionally draws a projected ground-plane grid.
+    CPU-only, no pytorch3d.
     """
-    try:
-        font = ImageFont.truetype("DejaVuSans-Bold.ttf", 14)
-        font_row = ImageFont.truetype("DejaVuSans-Bold.ttf", 18)
-    except (OSError, IOError):
-        font = ImageFont.load_default(); font_row = font
+    H, W = out_size, out_size
+    canvas = np.full((H, W, 3), bg, dtype=np.uint8)
 
-    def fit_h(im: Image.Image, h: int) -> Image.Image:
-        w, h0 = im.size
-        new_w = max(1, int(w * h / h0))
-        return im.resize((new_w, h), Image.LANCZOS)
+    vis_insts = [inst for inst in instances if inst["corners3d"] is not None]
+    if not vis_insts:
+        cv2.putText(canvas, "no 3D boxes to render", (20, H // 2),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (100, 100, 100), 2)
+        return canvas
 
-    # Pre-resize everything
-    resized_rows: Dict[str, List[Tuple[str, Image.Image, Image.Image]]] = {}
-    for row_key, cells in rows.items():
-        resized_rows[row_key] = [(label, fit_h(img3d, cell_h), fit_h(bev, cell_h))
-                                  for label, img3d, bev in cells]
+    all_verts = np.concatenate([i["corners3d"] for i in vis_insts], axis=0)
+    vmin = all_verts.min(axis=0)
+    vmax = all_verts.max(axis=0)
+    center = (vmin + vmax) / 2.0
+    max_y = vmax[1]
 
-    # Compute per-column widths: max across rows for matching col index
-    n_cols = max(len(c) for c in resized_rows.values()) if resized_rows else 0
-    col_widths = []
-    for ci in range(n_cols):
-        ws = []
-        for row_key, cells in resized_rows.items():
-            if ci < len(cells):
-                _, img3d, bev = cells[ci]
-                ws.append(img3d.size[0] + gap + bev.size[0])
-        col_widths.append(max(ws) if ws else 0)
+    view_R = euler2mat([pitch_rad, 0, 0])
 
-    row_total_w = row_label_w + sum(col_widths) + gap * (n_cols - 1)
-    n_rows = len(resized_rows)
-    row_total_h = label_h + cell_h
-    total_h = n_rows * row_total_h + (n_rows - 1) * gap
+    K_nv = np.array(K, dtype=np.float64).copy()
+    K_nv[0, -1] *= W / im_shape[1]
+    K_nv[1, -1] *= H / im_shape[0]
 
-    canvas = Image.new("RGB", (row_total_w, total_h), (255, 255, 255))
-    d = ImageDraw.Draw(canvas)
+    def rotate_verts(v):
+        return (view_R @ (v - center).T).T
 
-    y = 0
-    sorted_rows = sorted(resized_rows.keys(),
-                         key=lambda k: (ROW_ORDER.index(k) if k in ROW_ORDER else 99, k))
-    for row_key in sorted_rows:
-        cells = resized_rows[row_key]
-        # Row label band (vertical strip on left)
-        # Draw a translucent band; rotate text 90°
-        band_color = (240, 245, 250) if row_key == "ZS" else (240, 250, 240)
-        d.rectangle([0, y, row_label_w, y + row_total_h], fill=band_color, outline=(220, 220, 230))
-        # Vertical text via temporary image rotation
-        tmp = Image.new("RGBA", (row_total_h, row_label_w), (0, 0, 0, 0))
-        td = ImageDraw.Draw(tmp)
-        td.text((10, 4), row_key, fill=(40, 40, 50), font=font_row)
-        tmp = tmp.rotate(90, expand=True)
-        canvas.paste(tmp, (0, y), tmp)
+    base_rot = rotate_verts(all_verts)
 
-        x = row_label_w
-        for ci, (label, img3d, bev) in enumerate(cells):
-            col_w = col_widths[ci]
-            # Cell label (top of each cell)
-            d.text((x + 6, y + 4), label, fill=(20, 20, 20), font=font)
-            # Cell content: img3d + BEV side-by-side, centered in column
-            content_w = img3d.size[0] + gap + bev.size[0]
-            x_cell = x + (col_w - content_w) // 2
-            canvas.paste(img3d, (x_cell, y + label_h))
-            canvas.paste(bev, (x_cell + img3d.size[0] + gap, y + label_h))
-            x += col_w + gap
+    zoom_factor = 100.0
+    zoom_factor_in = zoom_factor
+    margin = 0.01
+    max_trials = 10000
+    best_zoom = zoom_factor
 
-        y += row_total_h + gap
+    while max_trials > 0:
+        zoom_factor_in *= 0.95
+        verts = base_rot.copy()
+        verts[:, -1] += center[-1] * zoom_factor_in
+        if (verts[:, -1] < 0.25).any():
+            break
+        proj = (K_nv @ verts.T) / verts[:, -1]
+        if (proj[:2, :] < W * margin).any():
+            break
+        if (proj[:2, :] > W * (1 - margin)).any():
+            break
+        best_zoom = zoom_factor_in
+        max_trials -= 1
 
+    zoom_out_bias = float(center[-1])
+    zoom_factor = best_zoom
+
+    def transform(v):
+        r = rotate_verts(v)
+        r[:, -1] += zoom_out_bias * zoom_factor
+        return r
+
+    # Ground-plane grid
+    if with_grid:
+        min_x3d, _, min_z3d = vmin.tolist()
+        max_x3d, _, max_z3d = vmax.tolist()
+        span_x = max(max_x3d - min_x3d, 1e-3)
+        span_z = max(max_z3d - min_z3d, 1e-3)
+        x0 = round(min_x3d - span_x * 50)
+        x1 = round(max_x3d + span_x * 50)
+        z0 = round(min_z3d - span_z * 50)
+        z1 = round(max_z3d + span_z * 50)
+        step = max(1.0, int(max(x1 - x0, z1 - z0) / 200))
+        grid_xs = np.arange(x0, x1, step)
+        grid_zs = np.arange(z0, z1, step)
+        xs_mesh, zs_mesh = np.meshgrid(grid_xs, grid_zs)
+        ys_mesh = np.ones_like(xs_mesh) * max_y
+        pts = np.stack([xs_mesh, ys_mesh, zs_mesh], axis=-1).reshape(-1, 3)
+        pts_t = transform(pts)
+        pts_t[:, -1] = np.clip(pts_t[:, -1], 0.25, None)
+        pts_2d = (K_nv @ pts_t.T).T
+        pts_2d[:, :2] /= pts_2d[:, 2:]
+        in_x = (pts_2d[:, 0] >= -50) & (pts_2d[:, 0] < W + 50) & (pts_2d[:, 2] > 0)
+        in_z = (pts_2d[:, 1] >= -50) & (pts_2d[:, 1] < H + 50) & (pts_2d[:, 2] > 0)
+        if in_x.any() and in_z.any():
+            x3d_start = round(pts[:, 0][in_x].min() - 10)
+            x3d_end = round(pts[:, 0][in_x].max() + 10)
+            z3d_start = round(pts[:, 2][in_z].min() - 10)
+            z3d_end = round(pts[:, 2][in_z].max() + 10)
+            grid_xs = np.arange(x3d_start, x3d_end + 1)
+            grid_zs = np.arange(z3d_start, z3d_end + 1)
+            max_lines = 60
+            if len(grid_xs) > max_lines:
+                grid_xs = grid_xs[::max(1, len(grid_xs) // max_lines)]
+            if len(grid_zs) > max_lines:
+                grid_zs = grid_zs[::max(1, len(grid_zs) // max_lines)]
+            xs_mesh, zs_mesh = np.meshgrid(grid_xs, grid_zs)
+            ys_mesh = np.ones_like(xs_mesh) * max_y
+            pts = np.stack([xs_mesh, ys_mesh, zs_mesh], axis=-1)
+            shape0 = pts.shape
+            pts_flat = pts.reshape(-1, 3)
+            pts_t = transform(pts_flat)
+            pts_t[:, -1] = np.clip(pts_t[:, -1], 0.25, None)
+            pts_2d = (K_nv @ pts_t.T).T
+            pts_2d[:, :2] /= pts_2d[:, 2:]
+            pts_2d = pts_2d.reshape(shape0[0], shape0[1], 3)
+            for r in range(shape0[0] - 1):
+                for c in range(shape0[1] - 1):
+                    a = pts_2d[r, c]; b = pts_2d[r, c + 1]
+                    if a[2] > 0 and b[2] > 0:
+                        cv2.line(canvas, (int(a[0]), int(a[1])),
+                                 (int(b[0]), int(b[1])),
+                                 grid_color, 1, cv2.LINE_AA)
+                    a = pts_2d[r, c]; b = pts_2d[r + 1, c]
+                    if a[2] > 0 and b[2] > 0:
+                        cv2.line(canvas, (int(a[0]), int(a[1])),
+                                 (int(b[0]), int(b[1])),
+                                 grid_color, 1, cv2.LINE_AA)
+
+    # Cuboids, depth-sorted (far first)
+    vis_order = sorted(
+        range(len(vis_insts)),
+        key=lambda i: -vis_insts[i]["corners3d"].mean(0)[2]
+    )
+    font = max(0.5, H / 1000.0)
+    for i in vis_order:
+        inst = vis_insts[i]
+        color = inst["color_bgr"]
+        verts_t = transform(inst["corners3d"])
+        draw_3d_wireframe(canvas, K_nv, verts_t, color, thickness)
+        top_c = verts_t[4]
+        if top_c[-1] > 0:
+            p = (K_nv @ top_c) / top_c[-1]
+            _draw_label(canvas, (p[0], p[1]), inst.get("label", "?"),
+                        color, font_scale=font)
+
+    cv2.putText(canvas,
+                f"novel view  pitch={math.degrees(pitch_rad):.0f}°",
+                (12, H - 12), cv2.FONT_HERSHEY_SIMPLEX,
+                0.55, (90, 90, 90), 2)
     return canvas
 
 
-# ---------- Main ----------
+# =====================================================================
+# Build per-arch instances dict (with class colors attached)
+# =====================================================================
+
+def pred_instances_with_class_colors(preds_for_image: list, top_k: int,
+                                       score_min: float) -> list:
+    """Convert prediction list → instances format used by panel renderers.
+    Each instance gets a color_bgr based on its category_id."""
+    insts = [it for it in preds_for_image if float(it.get("score", 0)) >= score_min]
+    insts.sort(key=lambda x: -float(x.get("score", 0)))
+    insts = insts[:top_k]
+    out = []
+    for i, inst in enumerate(insts):
+        try:
+            x, y, w, h = inst["bbox"]
+            box2d = (x, y, x + w, y + h)
+        except Exception:
+            box2d = None
+        corners3d = None
+        if inst.get("bbox3D_cam") is not None:
+            try:
+                c = np.array(inst["bbox3D_cam"], dtype=np.float64)
+                if c.shape == (8, 3):
+                    corners3d = c
+            except Exception:
+                pass
+        if corners3d is None and all(k in inst for k in ("center_cam", "dimensions", "pose")):
+            try:
+                c = np.array(inst["center_cam"], dtype=np.float64).reshape(-1)
+                dd = np.array(inst["dimensions"], dtype=np.float64).reshape(-1)
+                p = np.array(inst["pose"], dtype=np.float64)
+                if p.size == 9: p = p.reshape(3, 3)
+                if c.size == 3 and dd.size == 3 and p.shape == (3, 3):
+                    corners3d = cuboid_corners(c, dd, p)
+            except Exception:
+                pass
+        cid = int(inst.get("category_id", 0))
+        score = float(inst.get("score", 0))
+        contig = DATASET_ID_TO_CONTIG.get(cid, cid)
+        cls_name = CLASSES[contig] if 0 <= contig < len(CLASSES) else f"cls{cid}"
+        out.append({
+            "box2d_xyxy": box2d,
+            "corners3d": corners3d,
+            "color_bgr": class_color_bgr(cid),
+            "label": f"{cls_name} {score:.2f}",
+            "_idx": i,
+        })
+    return out
+
+
+# =====================================================================
+# Composite layout: 2 rows × N cols, each cell = front + novel side-by-side
+# =====================================================================
+
+def make_cell(im_base: np.ndarray, K: np.ndarray, instances: list,
+              novel_size: int, thickness: int) -> np.ndarray:
+    """Build a single cell: [3D-on-image | novel-view] side-by-side, banner above."""
+    front = draw_3d_front_panel(im_base, instances, K, thickness)
+    H = front.shape[0]
+    nv_size = min(novel_size, H)
+    novel = novel_view_panel(K, im_base.shape[:2], instances, nv_size,
+                              pitch_rad=math.pi / 3, with_grid=True,
+                              thickness=thickness)
+    if novel.shape[0] < H:
+        pad = np.full((H - novel.shape[0], novel.shape[1], 3), 245, dtype=np.uint8)
+        novel = np.vstack([novel, pad])
+    elif novel.shape[0] > H:
+        novel = cv2.resize(novel,
+                           (int(novel.shape[1] * H / novel.shape[0]), H))
+    cell = np.hstack([front, novel])
+    return cell
+
+
+def add_cell_banner(cell: np.ndarray, label: str,
+                    banner_color=(45, 45, 50)) -> np.ndarray:
+    h_banner = max(34, cell.shape[0] // 24)
+    banner = np.full((h_banner, cell.shape[1], 3), 32, dtype=np.uint8)
+    cv2.rectangle(banner, (0, h_banner - 3), (cell.shape[1], h_banner),
+                  banner_color, -1)
+    scale = h_banner / 55.0
+    thick = max(2, int(scale * 2))
+    (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, scale, thick)
+    cv2.putText(banner, label,
+                ((cell.shape[1] - tw) // 2, (h_banner + th) // 2 - 4),
+                cv2.FONT_HERSHEY_SIMPLEX, scale, (255, 255, 255), thick)
+    return np.vstack([banner, cell])
+
+
+def add_row_label(row_img: np.ndarray, label: str, label_w: int = 60) -> np.ndarray:
+    """Prepend a vertical label band to a row."""
+    H = row_img.shape[0]
+    band_color = (250, 245, 240) if label == "ZS" else (240, 250, 240)
+    band = np.full((H, label_w, 3), band_color, dtype=np.uint8)
+    # Vertical text via rotation
+    tmp = np.full((label_w, H, 3), band_color, dtype=np.uint8)
+    scale = max(0.7, label_w / 60.0)
+    thick = max(2, int(scale * 2))
+    (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, scale, thick)
+    cv2.putText(tmp, label, ((H - tw) // 2, (label_w + th) // 2 - 4),
+                cv2.FONT_HERSHEY_SIMPLEX, scale, (40, 40, 50), thick)
+    band = cv2.rotate(tmp, cv2.ROTATE_90_COUNTERCLOCKWISE)
+    return np.hstack([band, row_img])
+
+
+def assemble_row(cells: list[Tuple[str, np.ndarray]], gap: int = 8) -> np.ndarray:
+    """Concatenate cells horizontally with a gap; pad shorter cells to max H."""
+    bannered = [add_cell_banner(c, label) for label, c in cells]
+    Hmax = max(b.shape[0] for b in bannered)
+    padded = []
+    for b in bannered:
+        if b.shape[0] < Hmax:
+            pad = np.full((Hmax - b.shape[0], b.shape[1], 3), 32, dtype=np.uint8)
+            padded.append(np.vstack([b, pad]))
+        else:
+            padded.append(b)
+    if gap > 0:
+        gap_img = np.full((Hmax, gap, 3), 32, dtype=np.uint8)
+        out = padded[0]
+        for nxt in padded[1:]:
+            out = np.hstack([out, gap_img, nxt])
+        return out
+    return np.hstack(padded)
+
+
+def assemble_grid(rows: Dict[str, list], gap: int = 8) -> np.ndarray:
+    """Build full 2-row × N-col grid with row labels."""
+    sorted_keys = sorted(rows.keys(),
+                         key=lambda k: ROW_ORDER.index(k) if k in ROW_ORDER else 99)
+    row_imgs = []
+    for key in sorted_keys:
+        row = assemble_row(rows[key], gap=gap)
+        row = add_row_label(row, key)
+        row_imgs.append(row)
+    if len(row_imgs) == 1:
+        return row_imgs[0]
+    Wmax = max(r.shape[1] for r in row_imgs)
+    padded = []
+    for r in row_imgs:
+        if r.shape[1] < Wmax:
+            pad = np.full((r.shape[0], Wmax - r.shape[1], 3), 32, dtype=np.uint8)
+            padded.append(np.hstack([r, pad]))
+        else:
+            padded.append(r)
+    if gap > 0:
+        gap_img = np.full((gap, Wmax, 3), 32, dtype=np.uint8)
+        out = padded[0]
+        for nxt in padded[1:]:
+            out = np.vstack([out, gap_img, nxt])
+        return out
+    return np.vstack(padded)
+
+
+# =====================================================================
+# Main
+# =====================================================================
+
+def load_predictions(path: Path) -> Dict[int, list]:
+    preds = torch.load(path, weights_only=False, map_location="cpu")
+    return {int(e["image_id"]): e.get("instances", []) for e in preds}
+
 
 def main():
-    ap = argparse.ArgumentParser()
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--gt", type=Path, required=True)
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--col", action="append", required=True,
-                    help="'<row> / <label>=path' where row in {ZS, FT}.")
+                    help="'<row> / <label>=path'.  row in {ZS, FT}.")
     ap.add_argument("--every", type=int, default=200)
     ap.add_argument("--limit", type=int, default=80)
     ap.add_argument("--score-min", type=float, default=0.0)
     ap.add_argument("--max-dets", type=int, default=12)
+    ap.add_argument("--novel-size", type=int, default=720)
+    ap.add_argument("--thickness", type=int, default=4)
     ap.add_argument("--image-root", type=str, default="")
     args = ap.parse_args()
 
     args.out.mkdir(parents=True, exist_ok=True)
 
-    # Parse cols → row → list of (label, path)
-    row_specs: Dict[str, List[Tuple[str, Path]]] = defaultdict(list)
+    # Parse cols
+    row_specs: Dict[str, list[Tuple[str, Path]]] = defaultdict(list)
     for spec in args.col:
         if "=" not in spec:
             print(f"  WARN bad --col: {spec}"); continue
         full_label, path_s = spec.split("=", 1)
-        # Split on " / " (or "/") to get row + arch label
         if "/" in full_label:
             row_part, arch_part = full_label.split("/", 1)
             row_part = row_part.strip(); arch_part = arch_part.strip()
@@ -425,18 +532,20 @@ def main():
         row_key = canonical_row(row_part)
         p = Path(path_s.strip())
         if not p.exists():
-            print(f"  WARN missing predictions: {p}"); continue
+            print(f"  WARN missing: {p}"); continue
         row_specs[row_key].append((arch_part, p))
 
     if not row_specs:
         print("FATAL: no valid columns"); return 2
     print("Rows:")
     for r, items in row_specs.items():
-        print(f"  {r}: {[label for label, _ in items]}")
+        print(f"  {r}: {[lbl for lbl, _ in items]}")
 
-    # Load GT + all predictions
     print(f"Loading GT from {args.gt}")
-    image_meta, gt_anns = load_gt_index(args.gt)
+    gt = json.loads(args.gt.read_text())
+    img_by_id = {im["id"]: im for im in gt["images"]}
+
+    # Load all predictions
     arch_preds: Dict[str, Dict[str, Dict[int, list]]] = {}
     for row_key, items in row_specs.items():
         arch_preds[row_key] = {}
@@ -444,51 +553,53 @@ def main():
             print(f"  loading {row_key} / {label}: {path}")
             arch_preds[row_key][label] = load_predictions(path)
 
-    # Common image_ids = those present in all archs across all rows
-    common_ids = set(image_meta.keys())
+    # Common image_ids across all archs
+    common = set(img_by_id.keys())
     for row_key, by_arch in arch_preds.items():
         for label, preds in by_arch.items():
-            common_ids = common_ids & set(preds.keys())
-    common_ids = sorted(common_ids)
-    print(f"common image_ids: {len(common_ids)}")
+            common = common & set(preds.keys())
+    common = sorted(common)
+    print(f"common image_ids: {len(common)}")
 
-    selected = common_ids[::args.every][:args.limit]
-    print(f"will render {len(selected)} composites (every={args.every}, limit={args.limit})")
+    selected = common[::args.every][:args.limit]
+    print(f"will render {len(selected)} composites")
 
     n_done = 0
     for img_id in selected:
-        meta = image_meta.get(img_id)
-        if meta is None: continue
-        K = meta.get("K") or [[1000, 0, meta["width"]/2],
-                              [0, 1000, meta["height"]/2],
-                              [0, 0, 1]]
-        K = np.asarray(K, dtype=np.float64)
-        if len(K.shape) == 3:
-            K = K.reshape(3, 3)
-
-        fp = meta.get("file_path", "") or ""
+        info = img_by_id.get(img_id)
+        if info is None: continue
+        fp = info.get("file_path", "") or ""
         if args.image_root and fp:
             fp = args.image_root + fp
-        image_path = Path(fp) if fp else None
+        img_path = Path(fp)
+        if not img_path.is_absolute():
+            img_path = Path("datasets") / img_path
+        if not img_path.exists():
+            continue
+        im_base = cv2.imread(str(img_path))
+        if im_base is None:
+            continue
+        K = np.array(info["K"], dtype=np.float64)
 
-        rows: Dict[str, List[Tuple[str, Image.Image, Image.Image]]] = {}
+        rows: Dict[str, list[Tuple[str, np.ndarray]]] = {}
         for row_key, by_arch in arch_preds.items():
             row_cells = []
             for label, preds in by_arch.items():
-                insts = preds.get(img_id, [])
-                img3d, bev = render_cell(
-                    image_path, K, (meta["width"], meta["height"]),
-                    insts, args.score_min, args.max_dets,
+                insts = pred_instances_with_class_colors(
+                    preds.get(img_id, []), args.max_dets, args.score_min,
                 )
-                row_cells.append((label, img3d, bev))
+                cell = make_cell(im_base, K, insts,
+                                 novel_size=args.novel_size,
+                                 thickness=args.thickness)
+                row_cells.append((label, cell))
             rows[row_key] = row_cells
 
-        composite = compose_panel(rows)
+        composite = assemble_grid(rows, gap=8)
         out_path = args.out / f"img_{img_id:06d}.jpg"
-        composite.save(out_path, quality=92, optimize=True)
+        cv2.imwrite(str(out_path), composite)
         n_done += 1
         if n_done <= 3 or n_done % 20 == 0:
-            print(f"  wrote {out_path.name} ({composite.size[0]}×{composite.size[1]})")
+            print(f"  wrote {out_path.name} ({composite.shape[1]}×{composite.shape[0]})")
 
     print(f"\nDone. {n_done} composites in {args.out}")
 

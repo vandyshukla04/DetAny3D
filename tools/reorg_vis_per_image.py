@@ -1,27 +1,31 @@
 """
 Reorganize per-architecture viz folders into per-image folders.
 
-Input  layout: output/viz_summary/<arch_label>/<image_filename>.png
-Output layout: output/viz_summary_per_image/<imgid>/{nogrid,grid}/
+OVMono3D's visualizer emits TWO files per image per architecture:
+  img_NNNNNN.jpg          — multi-panel grid (input | GT | prediction)
+  img_NNNNNN_nogrid.jpg   — clean single-panel prediction overlay
 
-For each image_id present in ≥2 architectures:
-  output/viz_summary_per_image/<imgid>/
-    nogrid/
-      <arch_label>.png       — copy of that arch's vis for this image
-      <arch_label>.png
+Input  layout: output/viz_summary/<arch_label>/img_<id>[_nogrid].jpg
+Output layout: output/viz_summary_per_image/img_<id>/{grid,nogrid}/<arch_label>.jpg
+                                              and        composite/composite.png
+
+Per image_id present in ≥2 architectures:
+  output/viz_summary_per_image/img_NNNNNN/
+    grid/                — multi-panel rendering of each arch
+      OVMono3D-LIFT_ZS_oracle.jpg
       ...
-    grid/
-      composite.png          — single composite image with all archs in a grid
-
-Robust to different filename conventions per arch — uses a regex to extract
-the image_id (the integer that appears after the last separator and before
-.png/.jpg).
+      DetAny3D_FT_2ep_seed0.jpg
+    nogrid/              — clean single-panel rendering of each arch
+      OVMono3D-LIFT_ZS_oracle.jpg
+      ...
+    composite/
+      composite_nogrid.png   — single image with all archs side-by-side from nogrid
 
 Usage:
     python tools/reorg_vis_per_image.py \
         --src output/viz_summary \
         --dst output/viz_summary_per_image \
-        [--min-archs 2]   # only keep image_ids present in >= N archs
+        [--min-archs 2] [--n-cols 3]
 """
 from __future__ import annotations
 
@@ -31,10 +35,10 @@ import shutil
 from collections import defaultdict
 from pathlib import Path
 
-# Architecture label → display order (controls grid layout)
+# Architecture label → display order in composite grid
 PREFERRED_ORDER = [
-    "OVMono3D-LIFT_ZS_rpn",
     "OVMono3D-LIFT_ZS_oracle",
+    "OVMono3D-LIFT_ZS_rpn",
     "OVMono3D-LIFT_ZS_gt2d",
     "OVMono3D-LIFT_FT_init5sp",
     "OVMono3D-LIFT_FT_25k",
@@ -45,92 +49,82 @@ PREFERRED_ORDER = [
 ]
 
 
-# Regex tries (in order) to pull a numeric image_id out of a filename.
-# Add more fallbacks here if your filenames don't fit.
-_ID_PATTERNS = [
-    re.compile(r"image[_-]?(\d+)", re.IGNORECASE),       # image_123.png, image123.png
-    re.compile(r"img[_-]?(\d+)", re.IGNORECASE),         # img_123.png
-    re.compile(r"(\d+)_3d", re.IGNORECASE),              # 123_3d_overlay.png
-    re.compile(r"frame[_-]?(\d+)", re.IGNORECASE),       # frame_123.png
-    re.compile(r"^(\d+)[._-]"),                           # 123_*.png
-    re.compile(r"^(\d+)\."),                              # 123.png
-    re.compile(r"_(\d+)\.\w+$"),                          # arbitrary_123.png
-]
+# Filename: img_NNNNNN.jpg  or  img_NNNNNN_nogrid.jpg
+# Captures (id, has_nogrid_suffix). Non-matching files are skipped.
+_FILENAME_RE = re.compile(
+    r"^img_(\d+)(_nogrid)?\.(?:jpg|jpeg|png)$",
+    re.IGNORECASE,
+)
 
 
-def extract_id(filename: str) -> str | None:
-    for p in _ID_PATTERNS:
-        m = p.search(filename)
-        if m:
-            return m.group(1).lstrip("0") or "0"
-    return None
+def parse_filename(name: str) -> tuple[str, str] | None:
+    """Return (image_id_str_zero_padded, kind) where kind is 'grid' or 'nogrid'."""
+    m = _FILENAME_RE.match(name)
+    if not m:
+        return None
+    img_id = m.group(1)        # keep the zero-padding so '000000' stays distinct
+    kind = "nogrid" if m.group(2) else "grid"
+    return img_id, kind
 
 
-def make_grid(images: list[Path], out_path: Path, n_cols: int = 3,
-              cell_h: int = 360, label_height: int = 28) -> bool:
-    """Compose images into a grid. Each cell is resized to (cell_h, ?) keeping aspect.
-    Labels each cell with the architecture name (parent stem).
-    Returns False if PIL is missing.
+def make_composite(image_paths: list[tuple[str, Path]],
+                   out_path: Path, n_cols: int = 3,
+                   cell_h: int = 360, label_height: int = 28) -> bool:
+    """Compose architecture images into a single labeled grid composite.
+
+    image_paths: list of (arch_label, source_path).
     """
     try:
         from PIL import Image, ImageDraw, ImageFont
     except ImportError:
-        print(f"  WARN: PIL not available; skipping grid for {out_path.parent.name}")
+        return False
+    if not image_paths:
         return False
 
-    if not images:
-        return False
-
-    # Try to find a common font; fall back to default
     try:
         font = ImageFont.truetype("DejaVuSans-Bold.ttf", 14)
     except (OSError, IOError):
         font = ImageFont.load_default()
 
-    # Resize each to a common height
-    pil_imgs = []
-    for p in images:
+    cells = []
+    for arch_label, p in image_paths:
         try:
             im = Image.open(p).convert("RGB")
-        except Exception as e:
-            print(f"    WARN: couldn't open {p.name}: {e}")
+        except Exception:
             continue
         w, h = im.size
-        new_w = int(w * cell_h / h)
+        new_w = max(1, int(w * cell_h / h))
         im = im.resize((new_w, cell_h), Image.LANCZOS)
-        # Add label band on top
+        # Top label band
         canvas = Image.new("RGB", (new_w, cell_h + label_height), (245, 245, 245))
         canvas.paste(im, (0, label_height))
         d = ImageDraw.Draw(canvas)
-        label = p.stem  # arch label (we copied with that name in nogrid)
-        d.text((4, 4), label, fill=(20, 20, 20), font=font)
-        pil_imgs.append(canvas)
+        d.text((6, 5), arch_label, fill=(20, 20, 20), font=font)
+        cells.append(canvas)
 
-    if not pil_imgs:
+    if not cells:
         return False
 
-    # Pad all to same width (use max width)
-    max_w = max(im.size[0] for im in pil_imgs)
-    cell_full_h = cell_h + label_height
+    max_w = max(c.size[0] for c in cells)
+    full_h = cell_h + label_height
     padded = []
-    for im in pil_imgs:
-        if im.size[0] == max_w:
-            padded.append(im)
+    for c in cells:
+        if c.size[0] == max_w:
+            padded.append(c)
         else:
-            canvas = Image.new("RGB", (max_w, cell_full_h), (245, 245, 245))
-            canvas.paste(im, ((max_w - im.size[0]) // 2, 0))
+            canvas = Image.new("RGB", (max_w, full_h), (245, 245, 245))
+            canvas.paste(c, ((max_w - c.size[0]) // 2, 0))
             padded.append(canvas)
 
     n = len(padded)
     n_cols = min(n_cols, n)
     n_rows = (n + n_cols - 1) // n_cols
-
     grid_w = max_w * n_cols
-    grid_h = cell_full_h * n_rows
+    grid_h = full_h * n_rows
     grid = Image.new("RGB", (grid_w, grid_h), (255, 255, 255))
-    for i, im in enumerate(padded):
-        r, c = divmod(i, n_cols)
-        grid.paste(im, (c * max_w, r * cell_full_h))
+    for i, c in enumerate(padded):
+        r, col = divmod(i, n_cols)
+        grid.paste(c, (col * max_w, r * full_h))
 
     out_path.parent.mkdir(parents=True, exist_ok=True)
     grid.save(out_path, optimize=True)
@@ -139,89 +133,99 @@ def make_grid(images: list[Path], out_path: Path, n_cols: int = 3,
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--src", type=Path, default=Path("output/viz_summary"),
-                    help="root containing per-arch subdirs")
-    ap.add_argument("--dst", type=Path, default=Path("output/viz_summary_per_image"),
-                    help="root for per-image output")
-    ap.add_argument("--min-archs", type=int, default=2,
-                    help="only keep image_ids present in >= N archs")
-    ap.add_argument("--n-cols", type=int, default=3, help="grid columns")
+    ap.add_argument("--src", type=Path, default=Path("output/viz_summary"))
+    ap.add_argument("--dst", type=Path, default=Path("output/viz_summary_per_image"))
+    ap.add_argument("--min-archs", type=int, default=2)
+    ap.add_argument("--n-cols", type=int, default=3)
     args = ap.parse_args()
 
     if not args.src.is_dir():
         print(f"FATAL: {args.src} not found")
         return 2
 
-    # arch → image_id → source path
-    arch_to_imgs: dict[str, dict[str, Path]] = defaultdict(dict)
+    # arch → image_id → {kind ('grid'/'nogrid') → Path}
+    arch_imgs: dict[str, dict[str, dict[str, Path]]] = defaultdict(lambda: defaultdict(dict))
+
     for arch_dir in sorted(args.src.iterdir()):
         if not arch_dir.is_dir():
             continue
         if arch_dir.name.startswith("_"):
-            continue   # skip _comparison_sheet etc
+            continue
         for f in arch_dir.iterdir():
-            if f.suffix.lower() not in (".png", ".jpg", ".jpeg"):
+            if not f.is_file():
                 continue
-            img_id = extract_id(f.name)
-            if img_id is None:
+            parsed = parse_filename(f.name)
+            if parsed is None:
                 continue
-            # Keep first occurrence per (arch, image) — typically only one anyway
-            if img_id not in arch_to_imgs[arch_dir.name]:
-                arch_to_imgs[arch_dir.name][img_id] = f
+            img_id, kind = parsed
+            arch_imgs[arch_dir.name][img_id][kind] = f
 
-    archs = list(arch_to_imgs.keys())
-    print(f"Discovered {len(archs)} architectures with vis output:")
+    archs = list(arch_imgs.keys())
+    print(f"Architectures discovered: {len(archs)}")
     for a in archs:
-        print(f"  {a:<35}: {len(arch_to_imgs[a])} images")
+        n_imgs = len(arch_imgs[a])
+        n_grid = sum(1 for d in arch_imgs[a].values() if "grid" in d)
+        n_nogrid = sum(1 for d in arch_imgs[a].values() if "nogrid" in d)
+        print(f"  {a:<35}: {n_imgs} unique IDs | {n_grid} grid + {n_nogrid} nogrid files")
 
-    # Invert: image_id → list of (arch, src_path)
-    img_to_archs: dict[str, list[tuple[str, Path]]] = defaultdict(list)
+    # Invert: image_id → arch → {kind: Path}
+    img_to_archs: dict[str, dict[str, dict[str, Path]]] = defaultdict(dict)
     for arch in archs:
-        for img_id, src in arch_to_imgs[arch].items():
-            img_to_archs[img_id].append((arch, src))
+        for img_id, kinds in arch_imgs[arch].items():
+            img_to_archs[img_id][arch] = kinds
 
-    # Filter to image_ids with >= min_archs coverage
-    keep = {iid: pairs for iid, pairs in img_to_archs.items() if len(pairs) >= args.min_archs}
-    print(f"\n{len(keep)} image_ids present in ≥{args.min_archs} archs (keeping)")
-    print(f"{len(img_to_archs) - len(keep)} image_ids in fewer archs (dropped)")
+    keep = {iid: data for iid, data in img_to_archs.items() if len(data) >= args.min_archs}
+    print(f"\nimage_ids in ≥{args.min_archs} archs: {len(keep)}  (dropped {len(img_to_archs) - len(keep)})")
 
     args.dst.mkdir(parents=True, exist_ok=True)
 
-    # Order helper: sort archs by PREFERRED_ORDER, then alphabetic
     pref_idx = {a: i for i, a in enumerate(PREFERRED_ORDER)}
-    def arch_key(a):
-        return (pref_idx.get(a, len(PREFERRED_ORDER)), a)
+    arch_key = lambda a: (pref_idx.get(a, len(PREFERRED_ORDER)), a)
 
     n_done = 0
-    for img_id in sorted(keep.keys(), key=lambda x: int(x) if x.isdigit() else 1e18):
-        per_img_dir = args.dst / f"img_{int(img_id):07d}" if img_id.isdigit() \
-                      else args.dst / f"img_{img_id}"
-        nogrid_dir = per_img_dir / "nogrid"
+    for img_id in sorted(keep.keys(), key=lambda x: int(x) if x.isdigit() else x):
+        per_img_dir = args.dst / f"img_{img_id}"
         grid_dir   = per_img_dir / "grid"
-        nogrid_dir.mkdir(parents=True, exist_ok=True)
+        nogrid_dir = per_img_dir / "nogrid"
+        comp_dir   = per_img_dir / "composite"
         grid_dir.mkdir(parents=True, exist_ok=True)
+        nogrid_dir.mkdir(parents=True, exist_ok=True)
 
-        # Copy per-arch images into nogrid/ with renamed-to-arch filename
-        pairs = sorted(keep[img_id], key=lambda p: arch_key(p[0]))
-        for arch, src in pairs:
-            ext = src.suffix
-            shutil.copy2(src, nogrid_dir / f"{arch}{ext}")
+        # Copy each arch's grid + nogrid versions
+        archs_for_img = sorted(keep[img_id].keys(), key=arch_key)
+        nogrid_paths_for_composite: list[tuple[str, Path]] = []
+        for arch in archs_for_img:
+            kinds = keep[img_id][arch]
+            for kind, src in kinds.items():
+                out_dir = grid_dir if kind == "grid" else nogrid_dir
+                ext = src.suffix
+                dst = out_dir / f"{arch}{ext}"
+                shutil.copy2(src, dst)
+                if kind == "nogrid":
+                    nogrid_paths_for_composite.append((arch, dst))
 
-        # Build the grid composite from the nogrid images
-        nogrid_files = sorted(
-            (p for p in nogrid_dir.iterdir() if p.suffix.lower() in (".png", ".jpg", ".jpeg")),
-            key=lambda p: arch_key(p.stem),
-        )
-        make_grid(nogrid_files, grid_dir / "composite.png", n_cols=args.n_cols)
+        # Build a composite from the nogrid versions (cleanest for visual comparison)
+        if nogrid_paths_for_composite:
+            make_composite(
+                nogrid_paths_for_composite,
+                comp_dir / "composite_nogrid.png",
+                n_cols=args.n_cols,
+            )
 
         n_done += 1
-        if n_done <= 5 or n_done % 25 == 0:
-            print(f"  built {per_img_dir.name}: {len(pairs)} archs")
+        if n_done <= 3 or n_done % 25 == 0:
+            print(f"  built {per_img_dir.name}: "
+                  f"{len(archs_for_img)} archs, "
+                  f"{sum(len(k) for k in keep[img_id].values())} files")
 
-    print(f"\nWrote {n_done} per-image folders to {args.dst}")
+    print(f"\nDone. {n_done} per-image folders in {args.dst}")
     print(f"\nExample inspection:")
     print(f"  ls {args.dst}/ | head")
-    print(f"  ls {args.dst}/$(ls {args.dst} | head -1)/")
+    if n_done:
+        first = sorted(keep.keys(), key=lambda x: int(x) if x.isdigit() else x)[0]
+        print(f"  ls {args.dst}/img_{first}/")
+        print(f"  ls {args.dst}/img_{first}/grid/")
+        print(f"  ls {args.dst}/img_{first}/nogrid/")
 
 
 if __name__ == "__main__":

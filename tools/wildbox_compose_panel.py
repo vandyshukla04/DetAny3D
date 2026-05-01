@@ -394,13 +394,14 @@ def pred_instances_with_class_colors(preds_for_image: list, top_k: int,
 # =====================================================================
 
 def make_cell(im_base: np.ndarray, K: np.ndarray, instances: list,
-              novel_size: int, thickness: int) -> np.ndarray:
+              novel_size: int, thickness: int,
+              with_grid: bool = True) -> np.ndarray:
     """Build a single cell: [3D-on-image | novel-view] side-by-side, banner above."""
     front = draw_3d_front_panel(im_base, instances, K, thickness)
     H = front.shape[0]
     nv_size = min(novel_size, H)
     novel = novel_view_panel(K, im_base.shape[:2], instances, nv_size,
-                              pitch_rad=math.pi / 3, with_grid=True,
+                              pitch_rad=math.pi / 3, with_grid=with_grid,
                               thickness=thickness)
     if novel.shape[0] < H:
         pad = np.full((H - novel.shape[0], novel.shape[1], 3), 245, dtype=np.uint8)
@@ -514,6 +515,8 @@ def main():
     ap.add_argument("--novel-size", type=int, default=720)
     ap.add_argument("--thickness", type=int, default=4)
     ap.add_argument("--image-root", type=str, default="")
+    ap.add_argument("--no-grid", action="store_true",
+                    help="Disable the ground-plane grid in the novel-view BEV panel.")
     args = ap.parse_args()
 
     args.out.mkdir(parents=True, exist_ok=True)
@@ -590,7 +593,8 @@ def main():
                 )
                 cell = make_cell(im_base, K, insts,
                                  novel_size=args.novel_size,
-                                 thickness=args.thickness)
+                                 thickness=args.thickness,
+                                 with_grid=not args.no_grid)
                 row_cells.append((label, cell))
             rows[row_key] = row_cells
 

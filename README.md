@@ -1,213 +1,107 @@
-> [!IMPORTANT]
-> 🌟 Stay up to date at [opendrivelab.com](https://opendrivelab.com/#news)!
+# WildBox — DetAny3D fine-tune / eval code
 
-# DetAny3D
+Supplementary code for the WildBox monocular 3D wildlife detection benchmark
+(anonymous review submission).
 
-This is the official repository for the **[Detect Anything 3D in the Wild](https://arxiv.org/abs/2504.07958)**, a promptable 3D detection foundation model capable of detecting any novel object under arbitrary camera configurations using only monocular inputs.
-
-
-<!-- ## 🖼️ Demo Results
-
-Below are example visualizations of DetAny3D predictions:
-
-<p align="center">
-  <img src="assets/demo1.jpg" alt="Demo 1" width="400"/>
-  <img src="assets/demo2.jpg" alt="Demo 2" width="400"/>
-</p>
-
-<p align="center">
-  <img src="assets/demo3.jpg" alt="Demo 3" width="400"/>
-  <img src="assets/demo4.jpg" alt="Demo 4" width="400"/>
-</p> -->
-
-## 📖 Table of Contents
-
-- [📌 TODO](#-todo)
-- [🚀 Getting Started](#-getting-started)
-  - [Step 1: Create Environment](#step-1-create-environment)
-  - [Step 2: Install Dependencies](#step-2-install-dependencies)
-- [📦 Checkpoints](#-checkpoints)
-- [📁 Dataset Preparation](#-dataset-preparation)
-- [🏋️‍♂️ Training](#️-training)
-- [🔍 Inference](#-inference)
-- [🌐 Launch Online Demo](#-launch-online-demo)
-- [📚 Citation](#-citation)
-
-
-## 📌 TODO
-
-### ✅ Done
-- Release full code
-- Provide training and inference scripts
-- Release the model weights
-
-### 🛠️ In Progress
-- **TODO**: Provide full conversion scripts for constructing DA3D locally
-- **TODO**: Simplify the inference process
-- **TODO**: Provide a tutorial for creating customized datasets and finetuning
-
-
-## 🚀 Getting Started
-
-### Step 1: Create Environment
-
-```
-conda create -n detany3d python=3.8
-conda activate detany3d
-```
+This repository extends **DetAny3D** (*Detect Anything 3D in the Wild*,
+arXiv:2504.07958) with the WildBox dataset preparation, fine-tuning recipe,
+and evaluation pipeline used to produce the DetAny3D rows in the paper. The
+architecture itself is unchanged from upstream; for the upstream README,
+checkpoints, and credits, see [`ORIGINAL_DETANY3D_README.md`](ORIGINAL_DETANY3D_README.md).
 
 ---
 
-### Step 2: Install Dependencies
+## What's in this repo
 
-#### ✅ (1) Install [Segment Anything (SAM)](https://github.com/facebookresearch/segment-anything)
+| Path | Purpose |
+|------|---------|
+| `detect_anything/` | DetAny3D model code (upstream — unchanged) |
+| `GroundingDINO/` | Pinned Grounding-DINO submodule for 2D oracle prompting (upstream) |
+| `train.py` | DetAny3D training / eval entry point |
+| `tools/wildbox_final.sh` | one-shot WildBox eval driver: prepares oracle 2D, runs ZS + FT, exports predictions, compiles paper tables |
+| `tools/wildbox_export_predictions.py` | converts DetAny3D inference outputs to the cross-arch comparison format |
+| `tools/wildbox_full_metrics.py` | runs 2D AP, 3D AP, BEV AP, and NHD on a checkpoint's predictions |
+| `tools/wildbox_compile_results.py` | aggregates all eval outputs into the paper tables |
+| `tools/wildbox_compose_panel.py` | builds the cross-architecture qualitative comparison figure |
+| `tools/visualize_class_consistent.py` | per-architecture qualitative viz with consistent class colors |
+| `data/` | Dataset configs and category metadata |
 
-Follow the official instructions to install SAM and download its checkpoints.
+---
 
-#### ✅ (2) Install [UniDepth](https://github.com/lpiccinelli-eth/UniDepth)
+## Setup
 
-Follow the UniDepth setup guide to compile and install all necessary packages.
+The DetAny3D training stack pins `torch 1.13.1+cu116`, `mmcv 2.0.1` (with CUDA
+ops), `opencv-python-headless`, and a specific Grounding-DINO commit; mixing
+versions silently breaks the multi-prompt 3D head. Follow upstream's setup:
 
-#### ✅ (3) Clone and configure [GroundingDINO](https://github.com/IDEA-Research/GroundingDINO)
-
-```
-git clone https://github.com/IDEA-Research/GroundingDINO.git
-cd GroundingDINO
-pip install -e .
-```
-
-> 👉 The exact dependency versions are listed in our `requirements.txt`
-
-
-## 📦 Checkpoints
-
-Please download third-party checkpoints from the following sources:
-
-- **SAM checkpoint**: Please download `sam_vit_h.pth` from the official [SAM GitHub Releases](https://github.com/facebookresearch/segment-anything)
-- **UniDepth / DINO checkpoints**: Available via [Google Drive](https://drive.google.com/drive/folders/17AOq5i1pCTxYzyqb1zbVevPy5jAXdNho?usp=drive_link)
-
-```
-detany3d_private/
-├── checkpoints/
-│   ├── sam_ckpts/
-│   │   └── sam_vit_h.pth
-│   ├── unidepth_ckpts/
-│   │   └── unidepth.pth
-│   ├── dino_ckpts/
-│   │   └── dino_swin_large.pth
-│   └── detany3d_ckpts/
-│       └── detany3d.pth
+```bash
+# upstream env
+conda create -n detany3d python=3.8.20
+conda activate detany3d
+pip install -r requirements.txt
+# build mmcv-full and the GroundingDINO submodule per ORIGINAL_DETANY3D_README.md
 ```
 
-> GroundingDINO's checkpoint should be downloaded from its [official repo](https://github.com/IDEA-Research/GroundingDINO) and placed as instructed in their documentation.
+Then download the upstream pre-trained weights as described in
+`ORIGINAL_DETANY3D_README.md` ("Checkpoints" section).
 
+---
 
-## 📁 Dataset Preparation
+## Reproducing the paper's DetAny3D row
 
-The `data/` directory should follow the structure below:
+The paper reports DetAny3D **fine-tuned for 2 epochs (oracle 2D), seed 0**
+as the headline DetAny3D number. ep3 overfits — see the ablation table.
 
-```
-data/
-├── DA3D_pkls/                             # DA3D processed pickle files 
-├── kitti/
-│   ├── test_depth_front/
-│   ├── ImageSets/
-│   ├── training/
-│   └── testing/
-├── nuscenes/
-|   ├── nuscenes_depth/
-│   └── samples/
-├── 3RScan/
-│   └── <token folders>/             # e.g., 10b17940-3938-...
-├── hypersim/
-|   ├── depth_in_meter/
-│   └── ai_XXX_YYY/                  # e.g., ai_055_009
-├── waymo/
-│   └── kitti_format/                # KITTI-format data for Waymo
-│       ├── validation_depth_front/
-│       ├── ImageSets/
-│       ├── training/
-│       └── testing/
-├── objectron/
-│   ├── train/
-│   └── test/
-├── ARKitScenes/
-│   ├── Training/
-│   └── Validation/
-├── cityscapes3d/
-│   ├── depth/
-│   └── leftImg8bit/
-├── SUNRGBD/
-│   ├── realsense/
-│   ├── xtion/
-|   ├── kv1/
-│   └── kv2/
+The eval is wrapped end-to-end by `tools/wildbox_final.sh`:
+
+```bash
+export WILDBOX_TRAIN_JSON=/path/to/WildBox_train_paper.json
+export WILDBOX_VAL_JSON=/path/to/WildBox_val_paper.json
+export GDINO_ORACLE_JSON=/path/to/gdino_WildBox_val_oracle_2d.json
+export OVMONO3D_REPO=/path/to/the/ovmono3d/checkout       # for cross-arch metrics
+export OVMONO3D_ENV_PREFIX=/path/to/your/ovmono3d/conda/env
+export DETANY3D_ENV_PREFIX=/path/to/your/detany3d/conda/env
+export NUM_GPUS=4
+
+bash tools/wildbox_final.sh
 ```
 
-> The download for `kitti`, `nuscenes`, `hypersim`, `objectron`, `arkitscenes`, and `sunrgbd` follow the [Omni3D](https://github.com/facebookresearch/omni3d) convention. Please refer to the Omni3D repository for details on how to organize and preprocess these datasets.
+This produces, under `exps/wildbox_final_*/`:
 
-> 🗂️ The `DA3D_pkls` (minimal metadata for inference) can be downloaded from [Google Drive](https://drive.google.com/drive/folders/17AOq5i1pCTxYzyqb1zbVevPy5jAXdNho?usp=drive_link).  
-> 🧩 **Note**: This release currently supports a minimal inference-only version. The conversion scripts of full dataset + all depth-related files will be provided later.
+* `inference/iter_final/WildBox_val/instances_predictions.pth` — raw model output
+* `bev_ap.json`, `summary_nhd.txt`, `full_metrics/` — per-run metrics
+* `reports/` — compiled paper tables (after `wildbox_compile_results.py`)
 
-> ⚠️ Depth files are not required for inference. You can safely set `depth_path = None` in [detany3d_dataset.py](./detect_anything/datasets/detany3d_dataset.py) to bypass depth loading.  
+### Single-architecture comparison
 
+To regenerate just the DetAny3D rows of the headline table from existing eval
+outputs:
 
-
-## 🏋️‍♂️ Training
-
-```
-torchrun \
-    --nproc_per_node=8 \
-    --master_addr=${MASTER_ADDR} \
-    --master_port=${MASTER_PORT} \
-    --nnodes=8 \
-    --node_rank=${RANK} \
-    ./train.py \
-    --config_path \
-    ./detect_anything/configs/train.yaml
+```bash
+python tools/wildbox_compile_results.py \
+    --row exps/wildbox_final_ft_eval_zs_oracle:"DetAny3D zero-shot (oracle 2D)" \
+    --row exps/wildbox_final_ft_eval_zs_gt2d:"DetAny3D zero-shot (GT 2D)" \
+    --row exps/wildbox_final_ft_eval_ep1_seed0_int1:"DetAny3D fine-tuned (1 epoch)" \
+    --row exps/wildbox_final_ft_eval_ep2_seed0_int1:"DetAny3D fine-tuned (2 epochs, headline)" \
+    --row exps/wildbox_final_ft_eval_ep3p_seed0_int1:"DetAny3D fine-tuned (3 epochs, overfits)" \
+    --out-dir reports
 ```
 
+### Cross-architecture qualitative figure
 
-## 🔍 Inference
+For the cross-arch composite (DetAny3D vs OVMono3D-LIFT, ZS vs FT, per
+species), see `tools/wildbox_compose_panel.py`. It expects predictions
+from both architectures to have already been exported via
+`tools/wildbox_export_predictions.py`.
 
-```
-torchrun \
-    --nproc_per_node=8 \
-    --master_addr=${MASTER_ADDR} \
-    --master_port=${MASTER_PORT} \
-    --nnodes=1 \
-    --node_rank=${RANK} \
-    ./train.py \
-    --config_path \
-    ./detect_anything/configs/inference_indomain_gt_prompt.yaml
-```
+---
 
+## Repo origin and licensing
 
-After inference, a file named `{dataset}_output_results.json` will be generated in the `exps/<your_exp_dir>/` directory.
-
-> ⚠️ Due to compatibility issues between `pytorch3d` and the current environment, we recommend copying the output JSON file into the evaluation script of repositories like [Omni3D](https://github.com/facebookresearch/omni3d) or [OVMono3D](https://github.com/UVA-Computer-Vision-Lab/ovmono3d) for standardized metric evaluation.
-
-> **TODO**: Evaluation for zero-shot datasets currently requires manual modification of the Omni3D or OVMono3D repositories and is not yet fully supported here.   
-We plan to release a merged evaluation script in this repository to make direct evaluation more convenient in the future.
-
-
-
-## 🌐 Launch Online Demo
-
-```
-python ./deploy.py
-```
-
-
-## 📚 Citation
-
-If you find this repository useful, please consider citing:
-
-```
-@article{zhang2025detect,
-  title={Detect Anything 3D in the Wild},
-  author={Zhang, Hanxue and Jiang, Haoran and Yao, Qingsong and Sun, Yanan and Zhang, Renrui and Zhao, Hao and Li, Hongyang and Zhu, Hongzi and Yang, Zetong},
-  journal={arXiv preprint arXiv:2504.07958},
-  year={2025}
-}
-```
+This repo is a fork of [DetAny3D by OpenDriveLab](https://github.com/OpenDriveLab/DetAny3D)
+The architecture, the SAM-based 2D head, the multi-prompt 3D head, and the
+foundation-model integration are all from upstream — see
+`ORIGINAL_DETANY3D_README.md` for full attribution. The contributions in
+this fork are: WildBox dataset registration, the 2-epoch fine-tuning recipe,
+the cross-architecture eval scripts, and the qualitative-comparison
+panel-builder. License is unchanged from upstream (see `LICENSE`).

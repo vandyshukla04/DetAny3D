@@ -84,28 +84,39 @@ echo "============================================================"
 
 # -- [1/4] Fine-tune (single-GPU, seeded) ---------------------------------
 FT_EXP_DIR="$EXP_ROOT/ft_seed${SEED}"
-EXISTING_CKPT=$(ls -t "$FT_EXP_DIR"/*/checkpoint_*.pth 2>/dev/null | head -1 || true)
-if [[ -n "$EXISTING_CKPT" ]]; then
-    echo "[1/4] checkpoint exists ($EXISTING_CKPT) -- skipping training"
+# "Training complete" == the FINAL-epoch checkpoint exists. DetAny3D saves
+# end-of-epoch checkpoints as checkpoint_{epoch}.pth (epochs 0..num_epochs-1) and
+# mid-epoch safety checkpoints as checkpoint_e{ep}_iter{N}.pth. Key STRICTLY off
+# the final-epoch file: a mid-epoch safety checkpoint must NOT count as "done",
+# else a re-submit after a mid-training death would evaluate a half-trained model
+# and silently corrupt this seed's row.
+NUM_EPOCHS=$(grep -E "^num_epochs:" "$CONFIG_FT" | grep -oE "[0-9]+" | head -1)
+NUM_EPOCHS=${NUM_EPOCHS:-2}
+LAST_EPOCH=$(( NUM_EPOCHS - 1 ))
+FINAL_CKPT=$(ls -t "$FT_EXP_DIR"/*/checkpoint_${LAST_EPOCH}.pth 2>/dev/null | head -1 || true)
+if [[ -n "$FINAL_CKPT" ]]; then
+    echo "[1/4] final-epoch checkpoint exists ($FINAL_CKPT) -- skipping training"
 else
-    echo "[1/4] fine-tune seed=$SEED -> $FT_EXP_DIR"
+    echo "[1/4] fine-tune seed=$SEED -> $FT_EXP_DIR (num_epochs=$NUM_EPOCHS)"
     PYTHONUNBUFFERED=1 torchrun --nproc_per_node=1 train.py \
         --config_path "$CONFIG_FT" \
         --seed "$SEED" \
         --exp_dir "$FT_EXP_DIR" 2>&1 | tee "logs/multiseed_ft_seed${SEED}.log"
+    FINAL_CKPT=$(ls -t "$FT_EXP_DIR"/*/checkpoint_${LAST_EPOCH}.pth 2>/dev/null | head -1 || true)
 fi
 
-FT_RUN_DIR=$(ls -dt "$FT_EXP_DIR"/*/ | head -1)
-FT_CKPT=$(ls -t "$FT_RUN_DIR"/checkpoint_*.pth | head -1)
-# Authoritative silent-skip guard (bug #7): if training's epoch loop never runs
-# (start_epoch >= num_epochs), NO checkpoint is written. So a present checkpoint
-# IS proof training iterated. NOTE: DetAny3D logs progress via tqdm + TensorBoard
-# and writes log.log (NOT log.txt), so grepping an exp-dir log for 'iter:' lines
-# is unreliable -- the checkpoint is the real signal.
+# Authoritative silent-skip guard (bug #7): checkpoint_{LAST_EPOCH}.pth is only
+# written if the epoch loop actually ran the last epoch -- its presence proves
+# training completed. (DetAny3D logs progress via tqdm + TensorBoard and writes
+# log.log, NOT a log.txt with 'iter:' lines, so grepping an exp-dir log is
+# unreliable; the final-epoch checkpoint is the real signal.)
+FT_CKPT="$FINAL_CKPT"
 [[ -f "$FT_CKPT" ]] || {
-    echo "ERROR: no checkpoint under $FT_RUN_DIR -- training produced none (silent-skip bug #7?)" >&2
+    echo "ERROR: no final-epoch checkpoint (checkpoint_${LAST_EPOCH}.pth) under $FT_EXP_DIR --" >&2
+    echo "       training incomplete or silently skipped (bug #7). Re-submit to retrain." >&2
     exit 2
 }
+FT_RUN_DIR=$(dirname "$FT_CKPT")
 # Advisory only: count tqdm progress snapshots in the tee'd training log (e.g.
 # '800/45978 ['). Warn but never abort -- the checkpoint check above is the gate.
 TEE_LOG="logs/multiseed_ft_seed${SEED}.log"

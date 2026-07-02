@@ -24,7 +24,7 @@ Usage — N rows in one table::
         --row /path/to/zs_gt2d_run:"DetAny3D zero-shot (GT 2D)" \\
         --row /path/to/ft_1ep_run:"DetAny3D fine-tuned (1 epoch, oracle 2D)" \\
         --row /path/to/ft_2ep_run:"DetAny3D fine-tuned (2 epochs, oracle 2D)" \\
-        --out-dir /storage3/3DOM/vshukla/DetAny3D/reports
+        --out-dir reports
 
 Each ``--row`` is ``DIR:LABEL``. Order matters — the columns of the headline
 table follow the order you pass them. For sub-claim verdicts the script
@@ -584,12 +584,10 @@ def render_design_md(rows: List[Dict]) -> str:
          "from prereqs to paper figures.\n")
     push("- **Smoke validation**: [QUICK_START_SMOKE_TEST_DETANY3D.md](../QUICK_START_SMOKE_TEST_DETANY3D.md) — "
          "~50-min end-to-end pipeline check.\n")
-    push("- **Thorough reference**: [WILDBOX_DETANY3D.md](../WILDBOX_DETANY3D.md) — "
-         "architecture, env hazards, configs, eval, bug catalogue, cross-arch protocol.\n")
-    push("- **Branch / fork**: `wildbox_detany3d` on `https://github.com/vandyshukla04/DetAny3D`.\n")
-    push("- **Env**: `/storage3/3DOM/vshukla/envs/detany3d` on the cluster (Python 3.8, "
-         "torch 1.13.1+cu116, mmcv 2.0.1 with CUDA ops, opencv-python-headless, "
-         "GroundingDINO at the pinned commit).\n")
+    push("- **Reference**: see the repository README for architecture, env hazards, "
+         "configs, eval, and the cross-arch protocol.\n")
+    push("- **Env**: Python 3.8, torch 1.13.1+cu116, mmcv 2.0.1 with CUDA ops, "
+         "opencv-python-headless, GroundingDINO at the pinned commit.\n")
     return "\n".join(out)
 
 

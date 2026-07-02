@@ -18,9 +18,9 @@
 #   DETANY3D_REPO         - default $(pwd)
 #   PATH_REMAP            - "/old=/new" prefix rewrite for image paths
 #   OVMONO3D_ENV_PREFIX   - conda env path with shapely 2.x + pytorch3d-CPU
-#                           (default /storage3/3DOM/vshukla/envs/ovmono3d)
+#                           (REQUIRED — no default)
 #   DETANY3D_ENV_PREFIX   - conda env path used for inference + training
-#                           (default /storage3/3DOM/vshukla/envs/detany3d)
+#                           (REQUIRED — no default)
 
 set -eo pipefail
 
@@ -32,8 +32,8 @@ set -eo pipefail
 NUM_GPUS=${NUM_GPUS:-4}
 DETANY3D_REPO=${DETANY3D_REPO:-$(pwd)}
 PATH_REMAP=${PATH_REMAP:-}
-OVMONO3D_ENV_PREFIX=${OVMONO3D_ENV_PREFIX:-/storage3/3DOM/vshukla/envs/ovmono3d}
-DETANY3D_ENV_PREFIX=${DETANY3D_ENV_PREFIX:-/storage3/3DOM/vshukla/envs/detany3d}
+: "${OVMONO3D_ENV_PREFIX:?required — set to your local OVMono3D conda env prefix}"
+: "${DETANY3D_ENV_PREFIX:?required — set to your local DetAny3D  conda env prefix}"
 
 # Source conda so `conda activate` works inside this non-interactive shell.
 CONDA_BASE=$(conda info --base 2>/dev/null || echo /opt/miniforge3)

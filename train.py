@@ -24,6 +24,8 @@ from torch.nn.utils.rnn import pad_sequence
 from detect_anything.modeling.depth_predictor.unidepth_utils import generate_rays
 from torch.utils.tensorboard import SummaryWriter
 import random
+import torch
+import numpy as np
 from torch.cuda.amp import GradScaler, autocast
 from contextlib import nullcontext  # Python 3.7+ 提供的空上下文管理器
 from torch.distributed import all_gather_object
@@ -33,7 +35,11 @@ def parse_args():
     parser.add_argument('--config_path', default='/cpfs01/user/jianghaoran/detany3d/DetAny3D0827/segment_anything/configs/dlc_config.yaml', type=str, help='abosulute path of the config') 
     parser.add_argument('--resume', type=str, help='Path to resume checkpoint')
     parser.add_argument('--exp_dir', type=str, help='Path to save checkpoint')
-    args = parser.parse_args() 
+    parser.add_argument('--seed', type=int, default=None,
+                        help='RNG seed for reproducible multi-seed runs. If '
+                             'omitted, behaviour is the legacy nondeterministic '
+                             'path (no manual_seed; sampler uses default seed=0).')
+    args = parser.parse_args()
     print(f'args: {args}')
     return args
 
@@ -499,10 +505,33 @@ def main():
     cfg.writer = writer
 
     logger.info(cfg)
+
+    # --- Reproducible multi-seed support (added for the 5-seed WildBox study) ---
+    # DetAny3D historically pinned no RNG seed, so runs were nondeterministic
+    # (WILDBOX_DETANY3D.md: "no explicit torch.manual_seed call"). Passing
+    # --seed N (or setting `seed:` in the config) now pins Python/NumPy/torch
+    # RNGs *and* the DistributedSampler shuffle, so a seed is reproducible.
+    # When no seed is given, behaviour is byte-for-byte the legacy path and the
+    # sampler falls back to its default seed=0 -- so the zero-shot eval config
+    # and the already-run seed0/seed2 are completely unaffected. The same seed
+    # is used on every rank (DDP re-broadcasts rank-0 weights anyway; the
+    # sampler partitions per-rank internally), which is correct for both the
+    # 1-GPU headline path and any future DDP run.
+    _seed = cfg.get('seed', None)
+    sampler_seed = 0
+    if _seed is not None:
+        _seed = int(_seed)
+        sampler_seed = _seed
+        random.seed(_seed)
+        np.random.seed(_seed)
+        torch.manual_seed(_seed)
+        torch.cuda.manual_seed_all(_seed)
+        logger.info(f"[seed] rank {rank}: pinned python/numpy/torch RNGs to seed={_seed}")
+
     transform_train, transform_test = get_depth_transform()
-    
+
     train_dataset = DetAny3DDataset(cfg, transform = transform_train, mode = 'train')
-    train_sampler = DistributedSampler(train_dataset, shuffle=True)
+    train_sampler = DistributedSampler(train_dataset, shuffle=True, seed=sampler_seed)
     train_loader = DataLoader(train_dataset, batch_size=cfg.batch_size, sampler=train_sampler, collate_fn=collector)
 
     val_loaders = []

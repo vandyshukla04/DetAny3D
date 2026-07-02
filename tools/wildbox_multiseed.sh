@@ -97,15 +97,21 @@ fi
 
 FT_RUN_DIR=$(ls -dt "$FT_EXP_DIR"/*/ | head -1)
 FT_CKPT=$(ls -t "$FT_RUN_DIR"/checkpoint_*.pth | head -1)
-[[ -f "$FT_CKPT" ]] || { echo "ERROR: no checkpoint under $FT_RUN_DIR" >&2; exit 2; }
-
-# Silent-skip canary: training must have actually iterated (bug #7).
-N_ITER=$(grep -cE "iter[er]?[: ][0-9]+" "$FT_RUN_DIR"/log.txt 2>/dev/null || echo 0)
-if (( N_ITER < 50 )); then
-    echo "ERROR: only $N_ITER iter log lines under $FT_RUN_DIR -- training silently skipped?" >&2
-    exit 3
-fi
-echo "[1/4] done. checkpoint=$FT_CKPT  (iter log lines: $N_ITER)"
+# Authoritative silent-skip guard (bug #7): if training's epoch loop never runs
+# (start_epoch >= num_epochs), NO checkpoint is written. So a present checkpoint
+# IS proof training iterated. NOTE: DetAny3D logs progress via tqdm + TensorBoard
+# and writes log.log (NOT log.txt), so grepping an exp-dir log for 'iter:' lines
+# is unreliable -- the checkpoint is the real signal.
+[[ -f "$FT_CKPT" ]] || {
+    echo "ERROR: no checkpoint under $FT_RUN_DIR -- training produced none (silent-skip bug #7?)" >&2
+    exit 2
+}
+# Advisory only: count tqdm progress snapshots in the tee'd training log (e.g.
+# '800/45978 ['). Warn but never abort -- the checkpoint check above is the gate.
+TEE_LOG="logs/multiseed_ft_seed${SEED}.log"
+N_PROG=$(grep -oaE "[0-9]+/[0-9]+ \[" "$TEE_LOG" 2>/dev/null | wc -l | tr -d ' ')
+(( N_PROG >= 50 )) || echo "WARN: only $N_PROG tqdm progress snapshots in $TEE_LOG (checkpoint present, proceeding)" >&2
+echo "[1/4] done. checkpoint=$FT_CKPT  (tqdm progress snapshots: $N_PROG)"
 
 # -- [2/4] Fine-tuned oracle-2D eval (--resume override; parallel-safe) ----
 FT_EVAL_EXP_DIR="$EXP_ROOT/ft_eval_seed${SEED}"

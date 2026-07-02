@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 #SBATCH --job-name=wb_multiseed
 #SBATCH --partition=gpu-A40
+# Whole GPU (not a shard): SAM ViT-H + DINOv2 + UniDepth training needs most of
+# an A40's 48 GB, so --gres=gpu:1 is "really needed" per DICLUB's GPU policy.
+# This mirrors the proven FINAL_RUN_DETANY3D.md srun (same gres/mem/partition).
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=16
 #SBATCH --mem=200G
@@ -40,6 +43,9 @@ export DETANY3D_ENV_PREFIX="${DETANY3D_ENV_PREFIX:-/storage3/3DOM/vshukla/envs/d
 export OVMONO3D_ENV_PREFIX="${OVMONO3D_ENV_PREFIX:-/storage3/3DOM/vshukla/envs/ovmono3d}"
 
 echo "host=$(hostname) job=${SLURM_JOB_ID:-NA} array=${SLURM_ARRAY_JOB_ID:-NA} task/seed=$SEED"
-nvidia-smi --query-gpu=index,memory.free,utilization.gpu --format=csv || true
+# DICLUB policy: use ONLY the GPU(s) SLURM allocated via CUDA_VISIBLE_DEVICES,
+# and never overwrite it. train.py honours this (torch.cuda.set_device(0) maps
+# to the allocated card). Log it for the record.
+echo "CUDA_VISIBLE_DEVICES=${CUDA_VISIBLE_DEVICES:-<unset>}"
 
 bash tools/wildbox_multiseed.sh

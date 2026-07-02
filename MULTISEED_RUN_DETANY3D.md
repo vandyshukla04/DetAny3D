@@ -64,17 +64,32 @@ ls -la $OVMONO3D_REPO/datasets/Omni3D/WildBox_train.json \
 ## 2. One-time data-prep (run ONCE, before the array)
 
 Writes the shared pkls + oracle symlink so the concurrent array tasks only ever
-read them. Normally a no-op skip, since seed0/seed2 already produced the pkls.
+read them. Normally a **no-op skip**, since seed0/seed2 already produced the pkls.
+
+First just *check* (plain `ls` is fine on the frontend — it's data management):
 
 ```bash
 cd /storage3/3DOM/vshukla/DetAny3D
+ls -la data/pkls/wildbox/WildBox_train.pkl data/pkls/wildbox/WildBox_val.pkl \
+       datasets/Omni3D/gdino_WildBox_val_oracle_2d.json
+```
+
+- **All three present** → skip this section entirely; go to §3.
+- **Only the symlink missing** → recreate it (a link is data-management, OK on the
+  frontend): `ln -sf /storage2/3DOM/vshukla/repos/ovmono3d/datasets/Omni3D/gdino_WildBox_val_oracle_2d.json datasets/Omni3D/gdino_WildBox_val_oracle_2d.json`
+- **pkls missing** → run prep, but **on a CPU node, not the frontend** (DICLUB
+  Policy 0: the frontend is for submitting jobs + moving data only; the converter
+  loads multi-GB pickles = compute). Find your CPU partition with `sinfo -s`, then:
+
+```bash
 export OVMONO3D_REPO=/storage2/3DOM/vshukla/repos/ovmono3d
 export WILDBOX_TRAIN_JSON=$OVMONO3D_REPO/datasets/Omni3D/WildBox_train.json
 export WILDBOX_VAL_JSON=$OVMONO3D_REPO/datasets/Omni3D/WildBox_val.json
 export GDINO_ORACLE_JSON=$OVMONO3D_REPO/datasets/Omni3D/gdino_WildBox_val_oracle_2d.json
 export DETANY3D_ENV_PREFIX=/storage3/3DOM/vshukla/envs/detany3d
 
-bash tools/wildbox_multiseed_prep.sh
+srun -p <cpu-queue> --mem=200000 --cpus-per-task=8 --time=00:30:00 \
+     bash tools/wildbox_multiseed_prep.sh      # --mem in MB per DICLUB docs
 ```
 
 Expect `train: 45979 images ...` / `val: 13779 images ...` and `OK`.

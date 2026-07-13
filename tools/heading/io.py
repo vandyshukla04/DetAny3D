@@ -137,12 +137,54 @@ class Segment:
         return self.path / "vggt_results" / "depth_maps.npz"
 
 
+def _frame_scale(seg: Path, cams_raw: list[dict]) -> tuple[float, float]:
+    """Pixels-per-unit between the CAMERA's coordinate space and the actual JPEG.
+
+    *** THE MOST DANGEROUS THING IN THIS FILE ***
+
+    VGGT runs at a reduced resolution (long side 518), so `cameras.json` stores its
+    intrinsics -- AND `tracking_summary.json` stores `bbox_2d` -- in **518 x 294** space,
+    while the frames on disk are **1920 x 1080**. Nothing in the data announces this: the
+    camera entry's `image_width/height` fields report 518x294, so they look self-consistent
+    and it is easy to assume they describe the JPEG. They do not.
+
+    Consuming `bbox_2d` against the full-res frame therefore crops a patch ~3.7x too small
+    in the top-left corner -- pure background. That is silent: the crop is still a valid
+    image, a model still trains on it, and it can even score well by latching onto the
+    correlation between crop location and scene geometry. (It did: a head trained on those
+    crops reached "7 deg error / 91% flank" while never having seen an animal.)
+
+    So we rescale ONCE, here, to the frame's true resolution -- and everything downstream
+    (crops, projection, drawing) is in honest full-res pixels.
+    """
+    if not cams_raw:
+        return 1.0, 1.0
+    declared_w = float(cams_raw[0]["image_width"])
+    declared_h = float(cams_raw[0]["image_height"])
+    frame = seg / cams_raw[0]["image_name"]
+    if not frame.is_file():
+        return 1.0, 1.0
+    try:
+        from PIL import Image
+
+        with Image.open(frame) as im:
+            real_w, real_h = im.size
+    except Exception:
+        return 1.0, 1.0
+    if declared_w <= 0 or declared_h <= 0:
+        return 1.0, 1.0
+    return real_w / declared_w, real_h / declared_h
+
+
 def load_segment(seg_dir: str | Path, rotations: Rotations = "canonical") -> Segment:
-    """Load a segment.
+    """Load a segment, rescaled to the FRAME's true pixel resolution.
 
     `rotations="canonical"` (default) reads the annotator's sign-aligned rotations --
     the ones the face-locks index into, so this is what validation must use.
     `rotations="raw"` reads the per-frame PCA rotations that WildBox was built from.
+
+    Intrinsics and `bbox_2d` are scaled from VGGT's 518x294 working space to the actual
+    JPEG resolution -- see `_frame_scale`, and do not remove it.
     """
     seg = Path(seg_dir)
     if rotations == "canonical":
@@ -157,6 +199,11 @@ def load_segment(seg_dir: str | Path, rotations: Rotations = "canonical") -> Seg
     summary = json.loads(summary_path.read_text())
     cams_raw = json.loads(cams_path.read_text())["cameras"]
 
+    # VGGT stores intrinsics AND bbox_2d at its 518x294 working resolution, while the
+    # frames are full-res. Rescale ONCE, here. See _frame_scale.
+    sx, sy = _frame_scale(seg, cams_raw)
+
+    bbox_scale = np.array([sx, sy, sx, sy], dtype=np.float64)   # (x1, y1, x2, y2)
     tracks = {
         tid: Track(
             track_id=tid,
@@ -165,21 +212,24 @@ def load_segment(seg_dir: str | Path, rotations: Rotations = "canonical") -> Seg
             centers=np.asarray(t["centers"], dtype=np.float64),
             dimensions=np.asarray(t["dimensions"], dtype=np.float64),
             rotations=np.asarray(t["rotation_matrices"], dtype=np.float64),
-            bbox_2d=np.asarray(t["bbox_2d"], dtype=np.float64),
+            bbox_2d=np.asarray(t["bbox_2d"], dtype=np.float64) * bbox_scale,
         )
         for tid, t in summary["tracks"].items()
     }
-    cameras = {
-        int(c["frame_index"]): Camera(
+
+    cameras = {}
+    for c in cams_raw:
+        K = np.asarray(c["intrinsic"], dtype=np.float64).copy()
+        K[0, :] *= sx                                            # fx, skew, cx
+        K[1, :] *= sy                                            # fy, cy
+        cameras[int(c["frame_index"])] = Camera(
             frame_index=int(c["frame_index"]),
             extrinsic=np.asarray(c["extrinsic"], dtype=np.float64),
-            intrinsic=np.asarray(c["intrinsic"], dtype=np.float64),
+            intrinsic=K,
             image_name=c["image_name"],
-            width=int(c["image_width"]),
-            height=int(c["image_height"]),
+            width=int(round(float(c["image_width"]) * sx)),
+            height=int(round(float(c["image_height"]) * sy)),
         )
-        for c in cams_raw
-    }
     return Segment(path=seg, rotations=rotations, tracks=tracks, cameras=cameras)
 
 

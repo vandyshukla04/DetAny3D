@@ -1,28 +1,38 @@
-"""Train the small heading head on frozen DINOv3 features.
+"""BASELINE: a small supervised head on frozen DINOv3, trained on the motion labels.  [GPU]
 
-    python -m tools.heading.train_head --features data/heading/features.npz
+    python -m tools.heading.train_head --features data/heading/features.npz \
+        --save data/heading/head.pt --device cuda
 
-Predicts the animal's heading as a point on the unit circle (cos, sin) in image space,
-then reports the number that actually matters for re-ID:
+This is the COMPARISON POINT for the part probe (parts.py), not the proposed method. If the
+training-free part cue matches or beats it, we get the heading with no training and no
+dependence on locomotion at all.
 
-    FLANK accuracy -- are we looking at the animal's LEFT or RIGHT side?
+WHAT IT PREDICTS: THE ALLOCENTRIC ANGLE, NOT AN IMAGE ANGLE
+-----------------------------------------------------------
+A crop determines the animal's orientation RELATIVE TO THE VIEWING RAY. The same animal at the
+left and right edges of a frame looks identical but projects to different image angles -- so
+regressing an image angle asks the network to infer something the pixels do not contain, and
+conflates appearance with where the animal happened to sit in frame. (This was the flaw in the
+earlier version.)
 
-WHY FLANK IS THE HEADLINE METRIC
---------------------------------
-Wildlife re-ID is viewpoint-dependent: a zebra's left stripes are a different pattern
-from its right. Matching a left-flank query against a right-flank gallery is a guaranteed
-miss. The flank label flips exactly when the heading flips by 180 deg, so flank accuracy
-is a direct, task-level read on whether the heading is good enough to be useful.
+So the target is alpha: the heading measured in the ground-plane basis (r = horizontalised
+camera->animal ray, s = up x r). It is view-invariant and purely appearance-determined -- and
+it is exactly DetAny3D's `alpha` head, which already exists, already has a live loss, and is
+currently fed a hardcoded 0.0.
 
-A 180-deg error is the failure that matters; a 20-deg error is harmless. So we report
-the flip rate, not just the mean angular error.
+HOW IT IS SCORED: THE SAME 4-WAY QUESTION AS THE PROBE
+------------------------------------------------------
+A predicted alpha is snapped to the nearest of the box's 4 horizontal faces, and we ask
+whether that is the face the animal actually walks toward. Identical crops, identical metric,
+chance 25% -- so `parts.py` and this script produce two numbers that can be put side by side.
+We also report the raw allocentric angular error, which is the quantity that matters at
+inference (where no box, and hence no 4 candidates, may exist).
 
-SPLIT BY TRACK, NEVER BY FRAME
-------------------------------
-Adjacent frames of one animal are near-duplicates. A random frame split would leak the
-answer across the split and report a beautiful, meaningless number. We hold out whole
-TRACKS -- and, when there is more than one species, whole species too, since that is the
-generalisation question we actually care about.
+SPLIT BY VIDEO, NEVER BY TRACK OR FRAME
+---------------------------------------
+Every track in a video shares one flight, altitude, light and herd, so holding out a *track*
+leaves its whole scene in training. Measured: a track-split reported 96.7% while the model
+visibly broke on unseen footage. Videos, or nothing.
 """
 from __future__ import annotations
 
@@ -32,17 +42,11 @@ from pathlib import Path
 import numpy as np
 
 
-def flank_of(angle: np.ndarray) -> np.ndarray:
-    """Which flank faces the camera, given the heading angle in image space.
-
-    With the image y-axis pointing DOWN, an animal heading to image-right (angle ~0) is
-    seen from its LEFT side. The flank therefore flips with the sign of sin(angle)... but
-    the honest, geometry-free statement is: the flank is determined by which half-plane
-    the heading points into, so `cos(angle) >= 0` is a *consistent* binary flank label.
-    Consistency is all we need -- an overall naming flip is a single global convention,
-    which `faces.py` fixes exactly via `left = up x forward`.
-    """
-    return (np.cos(angle) >= 0).astype(int)
+def face_from_alpha(alpha: np.ndarray, face_alpha: np.ndarray) -> np.ndarray:
+    """Snap a predicted allocentric angle to the nearest of the 4 candidate front faces."""
+    d = np.abs(np.arctan2(np.sin(alpha[:, None] - face_alpha),
+                          np.cos(alpha[:, None] - face_alpha)))
+    return d.argmin(axis=1)
 
 
 def main() -> int:
@@ -53,168 +57,95 @@ def main() -> int:
     ap.add_argument("--hidden", type=int, default=512)
     ap.add_argument("--lr", type=float, default=1e-3)
     ap.add_argument("--batch", type=int, default=256)
+    ap.add_argument("--device", default="cuda")
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--save", type=Path, default=None)
     ap.add_argument("--holdout-species", default=None,
-                    help="train on everything else, test on this species (the gap test)")
-    ap.add_argument("--device", default="cpu")
-    ap.add_argument("--save", type=Path, default=None,
-                    help="write the trained head (+ feature normalisation) for predict.py")
-    ap.add_argument("--all-data", action="store_true",
-                    help="train on EVERY track (no held-out split). Use only for the final "
-                         "model you ship -- the reported metrics then mean nothing.")
+                    help="train on the other species and test on this one (the transfer test)")
     args = ap.parse_args()
 
     import torch
-    import torch.nn as nn
 
     d = np.load(args.features, allow_pickle=True)
-    X, Y, sp, tr = d["X"], d["Y"], d["species"], d["track"]
-    print(f"{len(X)} samples, {X.shape[1]}-d features, species={dict(zip(*np.unique(sp, return_counts=True)))}")
+    X, Y = d["X"], d["Y"]                                 # Y = (cos alpha, sin alpha)
+    sp, vid = d["species"], d["video"]
+    y_face, face_alpha = d["y_face"], d["face_alpha"]
+    print(f"{len(X)} samples, {X.shape[1]}-d, "
+          f"species={dict(zip(*np.unique(sp, return_counts=True)))}, "
+          f"{len(np.unique(vid))} videos")
 
-    # --- split by TRACK (never by frame: adjacent frames are near-duplicates) ---
-    if args.all_data:
-        tr_mask = np.ones(len(X), dtype=bool)
-        te = np.zeros(len(X), dtype=bool)
-        print(f"--all-data: training on ALL {len(X)} samples; held-out metrics are meaningless")
-    elif args.holdout_species:
+    # --- HOLD OUT WHOLE VIDEOS ---------------------------------------------------------
+    if args.holdout_species:
         te = sp == args.holdout_species
-        tr_mask = ~te
-        print(f"holding out species={args.holdout_species}: {te.sum()} test / {tr_mask.sum()} train")
+        print(f"holding out species={args.holdout_species}: {te.sum()} test / {(~te).sum()} train")
     else:
-        tracks = np.unique(tr)
-        rng = np.random.default_rng(0)
-        rng.shuffle(tracks)
-        test_tracks = set(tracks[: max(1, len(tracks) // 5)])
-        te = np.array([t in test_tracks for t in tr])
-        tr_mask = ~te
-        print(f"held-out {len(test_tracks)}/{len(tracks)} TRACKS: {te.sum()} test / {tr_mask.sum()} train")
-
-    if tr_mask.sum() == 0:
-        print("empty training split; nothing to do")
+        vids = np.unique(vid)
+        rng = np.random.default_rng(args.seed)
+        rng.shuffle(vids)
+        test_v = set(vids[: max(1, len(vids) // 3)].tolist())
+        te = np.array([v in test_v for v in vid])
+        print(f"held-out {len(test_v)}/{len(vids)} VIDEOS: {te.sum()} test / {(~te).sum()} train")
+    tr = ~te
+    if tr.sum() == 0 or te.sum() == 0:
+        print("empty split")
         return 1
 
-    mu, sd = X[tr_mask].mean(0, keepdims=True), X[tr_mask].std(0, keepdims=True) + 1e-6
-    Xtr = torch.tensor((X[tr_mask] - mu) / sd, device=args.device)
-    Ytr = torch.tensor(Y[tr_mask], device=args.device)
+    mu, sd = X[tr].mean(0, keepdims=True), X[tr].std(0, keepdims=True) + 1e-6
+    Xtr = torch.tensor((X[tr] - mu) / sd, device=args.device)
+    Ytr = torch.tensor(Y[tr], device=args.device)
     Xte = torch.tensor((X[te] - mu) / sd, device=args.device)
-    Yte = Y[te]
 
     from tools.heading.model import HEAD_VERSION, build_head
+    torch.manual_seed(args.seed)
     net = build_head(X.shape[1], args.hidden).to(args.device)
     opt = torch.optim.AdamW(net.parameters(), lr=args.lr, weight_decay=1e-4)
 
-    # MINI-BATCH training. The previous version did ONE full-batch step per "epoch" -- i.e.
-    # 60 gradient steps in total, which is badly undertrained. This is ~epochs * (N/batch)
-    # steps (thousands), with a cosine LR schedule.
     n = Xtr.shape[0]
-    steps_per_epoch = max(1, n // args.batch)
-    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs * steps_per_epoch)
-
+    spe = max(1, n // args.batch)
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs * spe)
     for ep in range(args.epochs):
         net.train()
         perm = torch.randperm(n, device=args.device)
         tot = 0.0
-        for b in range(steps_per_epoch):
+        for b in range(spe):
             sel = perm[b * args.batch: (b + 1) * args.batch]
             opt.zero_grad()
-            p = torch.nn.functional.normalize(net(Xtr[sel]), dim=-1)   # onto the unit circle
-            loss = (1 - (p * Ytr[sel]).sum(-1)).mean()                 # cosine loss on the angle
+            p = torch.nn.functional.normalize(net(Xtr[sel]), dim=-1)
+            loss = (1 - (p * Ytr[sel]).sum(-1)).mean()      # cosine loss = angular error
             loss.backward()
             opt.step()
             sched.step()
             tot += float(loss)
-        if ep % 10 == 0 or ep == args.epochs - 1:
-            print(f"  epoch {ep:3d}  loss {tot/steps_per_epoch:.4f}  "
-                  f"({(ep+1)*steps_per_epoch} steps)")
-
-    if args.save:
-        args.save.parent.mkdir(parents=True, exist_ok=True)
-        torch.save(
-            {
-                "state_dict": net.state_dict(),
-                "in_dim": int(X.shape[1]),
-                "hidden": args.hidden,
-                "head_version": HEAD_VERSION,
-                # The head is trained on NORMALISED features, so predict.py must apply the
-                # exact same transform. Shipping mu/sd with the weights makes that impossible
-                # to get wrong.
-                "mu": mu.astype(np.float32),
-                "sd": sd.astype(np.float32),
-                "trained_on": {"samples": int(tr_mask.sum()),
-                               "species": {k: int(v) for k, v in
-                                           zip(*np.unique(sp[tr_mask], return_counts=True))}},
-            },
-            args.save,
-        )
-        print(f"\nsaved head -> {args.save}")
-
-    if te.sum() == 0:
-        print("(no held-out split; skipping evaluation)")
-        return 0
+        if ep % 15 == 0 or ep == args.epochs - 1:
+            print(f"  epoch {ep:3d}  loss {tot/spe:.4f}")
 
     net.eval()
     with torch.no_grad():
         pred = torch.nn.functional.normalize(net(Xte), dim=-1).cpu().numpy()
 
-    ang_p = np.arctan2(pred[:, 1], pred[:, 0])
-    ang_t = np.arctan2(Yte[:, 1], Yte[:, 0])
-    err = np.abs(np.degrees(np.arctan2(np.sin(ang_p - ang_t), np.cos(ang_p - ang_t))))
-    flank_acc = (flank_of(ang_p) == flank_of(ang_t)).mean()
+    a_p = np.arctan2(pred[:, 1], pred[:, 0])
+    a_t = np.arctan2(Y[te][:, 1], Y[te][:, 0])
+    err = np.abs(np.degrees(np.arctan2(np.sin(a_p - a_t), np.cos(a_p - a_t))))
+    face_p = face_from_alpha(a_p, face_alpha[te])
+    face_ok = face_p == y_face[te]
 
-    print("\n=== HELD-OUT (per frame) ===")
-    print(f"  median angular error : {np.median(err):6.1f} deg")
-    print(f"  180-deg flips (>90)  : {100*(err>90).mean():6.1f}%   <- the failure that matters")
-    print(f"  FLANK accuracy       : {100*flank_acc:6.1f}%   <- the re-ID number")
-    print(f"  chance               :   50.0%")
+    print("\n=== HELD-OUT VIDEOS ===")
+    print(f"  allocentric angular error : median {np.median(err):5.1f} deg   "
+          f"(>90 deg on {100*(err>90).mean():.1f}%)")
+    print(f"  FRONT FACE (4-way)        : {100*face_ok.mean():5.1f}%   <- compare with parts.py")
+    print(f"  chance                    :  25.0%")
+    print(f"\n{'species':>9s} {'n':>6s} {'median err':>11s} {'4-way face':>11s}")
+    for s in sorted(set(sp[te].tolist())):
+        m = sp[te] == s
+        print(f"{s:>9s} {m.sum():6d} {np.median(err[m]):10.1f} {100*face_ok[m].mean():10.1f}%")
 
-    # --- Are the flips SCATTERED across frames, or concentrated in whole TRACKS? -----
-    # This decides everything. An animal's head does not swap ends mid-track, so if the
-    # flips are scattered, a track-level majority vote erases them. If instead entire
-    # tracks are confidently backwards, voting is useless and the cue itself is wrong.
-    te_tracks = tr[te]
-    print("\n=== per-track flip rate (held-out) ===")
-    per_track = []
-    for t in np.unique(te_tracks):
-        m = te_tracks == t
-        fr = float((err[m] > 90).mean())
-        per_track.append(fr)
-        name = t.split("::")[-1]
-        seg = t.split("/")[-1].split("::")[0]
-        flag = "  <-- WHOLE TRACK BACKWARDS" if fr > 0.5 else ""
-        print(f"  {seg:>18s} track {name:>3s}: {m.sum():4d} frames, {100*fr:5.1f}% flipped{flag}")
-
-    per_track = np.array(per_track)
-    fully = int((per_track > 0.5).sum())
-    print(f"\n  tracks >50% flipped : {fully}/{len(per_track)}")
-
-    # --- (a) track-level majority vote: ONE heading for the whole animal ---------------
-    # Simple, and it scores well here only because grazing zebras barely turn. It is wrong
-    # BY CONSTRUCTION for an animal that turns around mid-track, so it is not the answer.
-    voted_ok = 0
-    n_tracks = len(np.unique(te_tracks))
-    for t in np.unique(te_tracks):
-        m = te_tracks == t
-        voted_ok += int(np.bincount(flank_of(ang_p[m]), minlength=2).argmax()
-                        == np.bincount(flank_of(ang_t[m]), minlength=2).argmax())
-    print(f"  FLANK after track-vote     : {100*voted_ok/n_tracks:5.1f}% ({voted_ok}/{n_tracks} tracks)"
-          f"   [fragile: assumes the animal never turns]")
-
-    # --- (b) TEMPORAL TRACKING: kill impossible 180-deg jumps, keep genuine turns -------
-    from tools.heading.track import track_headings
-
-    te_frames = d["frame"][te]
-    ang_s = ang_p.copy()
-    for t in np.unique(te_tracks):
-        m = te_tracks == t
-        ang_s[m] = track_headings(te_frames[m], ang_p[m])
-
-    err_s = np.abs(np.degrees(np.arctan2(np.sin(ang_s - ang_t), np.cos(ang_s - ang_t))))
-    flank_s = (flank_of(ang_s) == flank_of(ang_t)).mean()
-    print(f"\n=== TEMPORALLY TRACKED (per frame, but flip-corrected + smoothed) ===")
-    print(f"  median angular error : {np.median(err_s):6.1f} deg   (was {np.median(err):.1f})")
-    print(f"  180-deg flips (>90)  : {100*(err_s>90).mean():6.1f}%   (was {100*(err>90).mean():.1f}%)")
-    print(f"  FLANK accuracy       : {100*flank_s:6.1f}%   (was {100*flank_acc:.1f}%)")
-    print(f"  -> keeps a PER-FRAME heading (so a turning animal is still handled),")
-    print(f"     unlike the track-vote which collapses the animal to one direction.")
+    if args.save:
+        args.save.parent.mkdir(parents=True, exist_ok=True)
+        torch.save({"state_dict": net.state_dict(), "in_dim": int(X.shape[1]),
+                    "hidden": args.hidden, "head_version": HEAD_VERSION,
+                    "mu": mu.astype(np.float32), "sd": sd.astype(np.float32),
+                    "target": "allocentric_alpha"}, args.save)
+        print(f"\nsaved -> {args.save}")
     return 0
 
 

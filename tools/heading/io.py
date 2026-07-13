@@ -1,7 +1,20 @@
-"""Loaders for the WildBox / VGGT segment artefacts.
+"""WildBox / VGGT segment loader.  *** HUMAN-LABEL VALIDATION ONLY. ***
 
-Everything the heading pipeline reads comes through here, so the on-disk layout is
-described in exactly one place.
+    DO NOT CUT CROPS WITH THIS. DO NOT BUILD TRAINING DATA WITH THIS.
+    Use `tools.heading.papersub` -- papersubdata is the dataset of record.
+
+This module survives for ONE reason: the human `track_face_locks.json` annotations are keyed
+to the WildBox tree, and they are our only independent check on the geometry (verified: the
+locked front face is among our 4 horizontal candidates on 11,084/11,084 instances). The
+face-lock tests in `tests/test_frame.py` read the tree through here.
+
+THE TRAP THIS MODULE CARRIES
+----------------------------
+In THIS tree both the intrinsics and `bbox_2d` are in VGGT's 518-space. In papersubdata the
+intrinsics are FULL-RES while `bbox_2d` is still 518-space. The two conventions differ, and
+mixing them is what once cut every training crop from the background and produced a confident
+"91.8% flank accuracy" from a model that had never seen an animal. `papersub.Segment.scale`
+*measures* the ratio and raises on a mismatch; this module does not. Hence: validation only.
 
 PROCESSED SEGMENT LAYOUT (the canonical one -- what the cluster has, and what the
 human face-locks are keyed to)::

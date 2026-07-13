@@ -84,6 +84,11 @@ FACE_NORMAL_LOCAL: dict[int, np.ndarray] = {
 }
 # => {0: -Y, 1: +Y, 2: -X, 3: +X, 4: +Z, 5: -Z}
 
+# Face id -> which LOCAL axis (0=x, 1=y, 2=z) it is normal to. Opposite faces share an axis.
+# Use this to index `dims`: the box extent along face `f` is `dims[FACE_AXIS[f]]`. Dotting a
+# face's *world* normal against `dims` is meaningless -- `dims` is in the local frame.
+FACE_AXIS: dict[int, int] = {f: int(np.argmax(np.abs(n))) for f, n in FACE_NORMAL_LOCAL.items()}
+
 OPPOSITE_FACE: dict[int, int] = {0: 1, 1: 0, 2: 3, 3: 2, 4: 5, 5: 4}
 
 SEMANTIC_NAMES = ("front", "back", "top", "bottom", "left", "right")

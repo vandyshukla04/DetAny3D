@@ -2,69 +2,46 @@
 
 THE PHYSICAL PRIOR
 ------------------
-An animal cannot swap its head and tail between two consecutive frames. So a ~180-degree
-reversal between adjacent frames is **provably a model error**, never a real motion. A
-*gradual* turn, accumulated over many frames, is real and must be preserved.
+An animal cannot swap its head and tail between two consecutive frames. A ~180-degree
+reversal between adjacent frames is therefore **provably a model error**. A *gradual* turn,
+accumulated over many frames, is real and must survive.
 
-That single observation is what separates this from the two naive alternatives:
+THE DOUBLED-ANGLE TRICK (this is the whole idea)
+------------------------------------------------
+Work in **2*theta**. A 180-degree flip maps theta -> theta+pi, so 2*theta -> 2*theta+2pi,
+which is *the same angle*. **The flip noise simply disappears.** So:
 
-* **Per-frame independent** (what we had): 2.8% of frames are flipped. Each flip inverts the
-  LEFT/RIGHT flank tag and would poison a re-ID gallery.
-* **Track-level majority vote**: forces ONE heading for the whole track. It scored 100% on the
-  grazing zebras only because they barely turn. It is *wrong by construction* for any animal
-  that turns around mid-track, which is exactly the interesting case.
+    1. double the raw per-frame headings  -> the flips vanish; what remains is the animal's
+       body AXIS over time, which is genuinely smooth,
+    2. unwrap + smooth that axis,
+    3. halve it back  -> a continuous heading trajectory, correct up to ONE global sign,
+    4. resolve that single sign by majority vote against the raw predictions.
 
-So we do neither. We walk the track, flip only the physically-impossible reversals (judged
-against the running, already-corrected neighbour -- not a global anchor, so a slow turn
-accumulates correctly), then smooth.
+There is **no sequential propagation**, so a single bad frame cannot cascade -- which is
+exactly what killed the first attempt at this (a naive neighbour-chained de-flipper seeded on
+frame 0; if frame 0 was one of the ~3% flipped frames it inverted the whole track, and image-
+space angles are *not* smooth near head-on views, so it "corrected" good frames too. Measured:
+it took flank accuracy from 96.8% DOWN to 79.0%. Do not reintroduce it.)
+
+WHY NOT A TRACK-LEVEL MAJORITY VOTE
+-----------------------------------
+It forces ONE heading for the whole track. It scores 100% on grazing zebras only because they
+barely turn; it is wrong *by construction* for an animal that turns around mid-track. The
+doubled-angle method keeps a per-frame heading, so a turning animal is handled.
 """
 from __future__ import annotations
 
 import numpy as np
 
-__all__ = ["correct_flips", "circular_smooth", "track_headings"]
+__all__ = ["circular_smooth", "track_headings"]
 
 
-def correct_flips(
-    angles: np.ndarray, conf: np.ndarray | None = None, *, max_jump_deg: float = 90.0
-) -> np.ndarray:
-    """Remove impossible ~180-degree reversals from a time-ordered heading sequence.
-
-    `angles` in radians, time-ordered. Comparison is against the running CORRECTED heading,
-    so a genuine gradual turn accumulates and survives; only a jump larger than
-    `max_jump_deg` in a single step -- which no animal can perform -- is treated as a flip
-    and corrected by adding pi.
-
-    We seed from the most confident frame and propagate outward in both directions, so one
-    bad frame at the start cannot poison the whole track.
-    """
-    a = np.asarray(angles, dtype=np.float64).copy()
-    n = len(a)
-    if n < 2:
-        return a
-    conf = np.ones(n) if conf is None else np.asarray(conf, dtype=np.float64)
-
-    thresh = np.radians(max_jump_deg)
-
-    def wrap(x: np.ndarray | float) -> np.ndarray | float:
-        return np.arctan2(np.sin(x), np.cos(x))
-
-    seed = int(np.argmax(conf))
-
-    for i in range(seed + 1, n):                       # forward
-        if abs(wrap(a[i] - a[i - 1])) > thresh:
-            a[i] = wrap(a[i] + np.pi)
-    for i in range(seed - 1, -1, -1):                  # backward
-        if abs(wrap(a[i] - a[i + 1])) > thresh:
-            a[i] = wrap(a[i] + np.pi)
-    return a
-
-
-def circular_smooth(angles: np.ndarray, window: int = 5) -> np.ndarray:
-    """Moving average on the unit circle (never average raw angles -- 359 and 1 average to 180)."""
+def circular_smooth(angles: np.ndarray, window: int = 9) -> np.ndarray:
+    """Moving average on the unit circle (never average raw angles: 359 and 1 average to 180)."""
     a = np.asarray(angles, dtype=np.float64)
     if len(a) < 2 or window < 2:
         return a
+    window = min(window, len(a))
     k = np.ones(window) / window
     c = np.convolve(np.cos(a), k, mode="same")
     s = np.convolve(np.sin(a), k, mode="same")
@@ -76,17 +53,46 @@ def track_headings(
     angles: np.ndarray,
     conf: np.ndarray | None = None,
     *,
-    max_jump_deg: float = 90.0,
-    window: int = 5,
+    window: int = 9,
 ) -> np.ndarray:
-    """Full pipeline for ONE track: sort by time -> de-flip -> smooth -> restore input order."""
-    order = np.argsort(np.asarray(frames))
-    a = np.asarray(angles, dtype=np.float64)[order]
-    c = None if conf is None else np.asarray(conf, dtype=np.float64)[order]
+    """Temporally coherent per-frame heading for ONE track. Angles in radians.
 
-    a = correct_flips(a, c, max_jump_deg=max_jump_deg)
-    a = circular_smooth(a, window=window)
+    See the module docstring: double -> unwrap -> smooth -> halve -> one global sign.
+    Returns per-frame headings in the caller's original ordering.
+    """
+    frames = np.asarray(frames)
+    a = np.asarray(angles, dtype=np.float64)
+    if len(a) < 3:
+        return a
 
-    out = np.empty_like(a)
-    out[order] = a
+    order = np.argsort(frames)
+    raw = a[order]
+    w = np.ones(len(raw)) if conf is None else np.asarray(conf, dtype=np.float64)[order]
+
+    # 1-2. In doubled space the 180-deg flips vanish; unwrap + smooth the body AXIS.
+    #
+    # NOTE: after np.unwrap the sequence is CONTINUOUS (it may run well outside [-pi, pi]),
+    # so it must be smoothed as a plain signal. Passing it through a circular smoother would
+    # re-wrap it via arctan2 and destroy the unwrapping -- which annihilates any genuine turn
+    # (measured: a real 180-deg turn collapsed to a 3-deg span). Edge-pad so the box filter
+    # does not drag the endpoints toward zero.
+    doubled = np.unwrap(2.0 * raw)
+    if window >= 2 and len(doubled) >= 2:
+        w_eff = min(window, len(doubled))
+        pad = w_eff // 2
+        padded = np.pad(doubled, pad, mode="edge")
+        doubled = np.convolve(padded, np.ones(w_eff) / w_eff, mode="valid")[: len(raw)]
+
+    # 3. Halve back -> a continuous heading, correct up to ONE global sign (theta vs theta+pi).
+    traj = doubled / 2.0
+
+    # 4. Resolve that single sign by confidence-weighted majority against the raw predictions.
+    agree = float(np.sum(w * np.cos(traj - raw)))
+    if agree < 0:
+        traj = traj + np.pi
+
+    traj = np.arctan2(np.sin(traj), np.cos(traj))       # wrap to [-pi, pi]
+
+    out = np.empty_like(traj)
+    out[order] = traj
     return out

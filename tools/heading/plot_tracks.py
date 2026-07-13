@@ -94,8 +94,8 @@ def main() -> int:
         m = te_tr == t
         o = np.argsort(te_fr[m])
         flip = (err[m][o] > 90).astype(int)
-        seg = t.split("/")[-1].split("::")[0]
-        tid = t.split("::")[-1]
+        seg, tid = t.split("::")[0], t.split("::")[-1]
+        seg = "/".join(Path(seg).parts[-2:])   # <video>/<seg> -- "seg1" alone is ambiguous
         if not flip.any():
             print(f"  {seg:>6s} track {tid:>3s}: clean")
             continue
@@ -139,7 +139,7 @@ def main() -> int:
         ax.plot(f, pr, color="tab:blue", lw=1.0, label="predicted")
         if flip.any():
             ax.scatter(f[flip], pr[flip], color="red", s=14, zorder=5, label="180-deg flip")
-        ax.set_title(f"{t.split('/')[-1].split('::')[0]} track {t.split('::')[-1]}"
+        ax.set_title(f"{'/'.join(Path(t.split('::')[0]).parts[-2:])} track {t.split('::')[-1]}"
                      f"   ({100*flip.mean():.0f}% flipped)", fontsize=9)
         ax.set_ylim(-190, 190)
         ax.tick_params(labelsize=7)

@@ -31,6 +31,14 @@ from pathlib import Path
 import numpy as np
 
 
+def _label(track_key: str) -> str:
+    """<video>/<seg> track <id>.  'seg1' alone is AMBIGUOUS -- several videos have a seg1,
+    and printing just 'seg1 track 4' made two different animals look like one."""
+    seg, tid = track_key.split("::")
+    parts = Path(seg).parts
+    return f"{parts[-2]}/{parts[-1]} track {tid}"
+
+
 def draw_arrow(draw, cx, cy, angle_rad, length, colour, width):
     """Arrow from (cx, cy) along `angle_rad`. Image y is DOWN, which is the same convention
     the heading target was measured in -- so no sign flip is needed here."""
@@ -98,27 +106,34 @@ def main() -> int:
     ang_t = np.arctan2(Y[:, 1], Y[:, 0])
     err = np.abs(np.degrees(np.arctan2(np.sin(ang_p - ang_t), np.cos(ang_p - ang_t))))
 
-    # pick the track
+    # --- pick the track (NEVER silently disambiguate) --------------------------------
+    # 'seg1' exists in several videos, so a substring like "seg1::4" matches MORE THAN ONE
+    # track. Quietly taking cands[0] showed the wrong (clean) animal and made a failing
+    # track look fine. Refuse to guess.
     if args.track:
         cands = [t for t in np.unique(tr) if args.track in t]
         if not cands:
             print(f"no track matching {args.track!r}. held-out tracks:")
             for t in sorted(test_tracks):
-                print("   ", t)
+                print(f"    {_label(t)}   [{100*(err[tr==t]>90).mean():.0f}% flipped]")
+            return 1
+        if len(cands) > 1:
+            print(f"AMBIGUOUS: {args.track!r} matches {len(cands)} tracks. Be specific:")
+            for t in cands:
+                print(f"    --track '{t}'    [{100*(err[tr==t]>90).mean():.0f}% flipped]")
             return 1
         key = cands[0]
     else:
         held = [t for t in np.unique(tr) if t in test_tracks]
         key = max(held, key=lambda t: (err[tr == t] > 90).mean())
-        print(f"no --track given; showing the WORST held-out track")
+        print("no --track given; showing the WORST held-out track")
 
     m = tr == key
     o = np.argsort(fr[m])
     idx = np.flatnonzero(m)[o][:: args.every]
     flips = err[idx] > 90
-    held_out = key in test_tracks
-    print(f"track {key}   {len(idx)} frames shown   {100*flips.mean():.0f}% flipped"
-          f"   ({'HELD OUT' if held_out else 'in TRAIN — take with salt'})")
+    print(f"track {_label(key)}   {len(idx)} frames   {100*flips.mean():.0f}% flipped"
+          f"   ({'HELD OUT' if key in test_tracks else 'in TRAIN -- take with salt'})")
 
     cols = args.cols
     rows = int(np.ceil(len(idx) / cols))

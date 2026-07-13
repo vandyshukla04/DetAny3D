@@ -38,11 +38,18 @@ def main() -> int:
     ap.add_argument("--device", default="cpu")
     args = ap.parse_args()
 
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
     import torch
     import torch.nn as nn
+
+    # The run-length analysis is the part that actually decides anything, and it needs no
+    # plotting. matplotlib is optional so this still works in the bare `dinov3` env.
+    try:
+        import matplotlib
+        matplotlib.use("Agg")
+        import matplotlib.pyplot as plt
+    except ModuleNotFoundError:
+        plt = None
+        print("(matplotlib not installed -- skipping the PNG, printing the analysis only)\n")
 
     d = np.load(args.features, allow_pickle=True)
     X, Y, tr, fr = d["X"], d["Y"], d["track"], d["frame"]
@@ -79,51 +86,18 @@ def main() -> int:
     te_tr, te_fr = tr[te], fr[te]
 
     uniq = sorted(np.unique(te_tr))
-    n = len(uniq)
-    cols = 3
-    rows = int(np.ceil(n / cols))
-    fig, axes = plt.subplots(rows, cols, figsize=(5 * cols, 2.6 * rows), squeeze=False)
 
-    for k, t in enumerate(uniq):
-        ax = axes[k // cols][k % cols]
-        m = te_tr == t
-        o = np.argsort(te_fr[m])
-        f = te_fr[m][o]
-        gt, pr, e = ang_t[m][o], ang_p[m][o], err[m][o]
-        flip = e > 90
-
-        ax.plot(f, gt, color="0.7", lw=2.5, label="ground truth")
-        ax.plot(f, pr, color="tab:blue", lw=1.0, label="predicted")
-        if flip.any():
-            ax.scatter(f[flip], pr[flip], color="red", s=14, zorder=5, label="180-deg flip")
-        seg = t.split("/")[-1].split("::")[0]
-        tid = t.split("::")[-1]
-        ax.set_title(f"{seg} track {tid}   ({100*flip.mean():.0f}% flipped)", fontsize=9)
-        ax.set_ylim(-190, 190)
-        ax.set_ylabel("heading (deg)", fontsize=7)
-        ax.tick_params(labelsize=7)
-        if k == 0:
-            ax.legend(fontsize=7, loc="lower left")
-
-    for k in range(n, rows * cols):
-        axes[k // cols][k % cols].axis("off")
-
-    fig.suptitle("Predicted vs GT heading per held-out track — "
-                 "RED = 180-deg flip.  Speckle => a temporal filter fixes it.  "
-                 "Solid blocks => the model is confidently backwards (a filter cannot help).",
-                 fontsize=10)
-    fig.tight_layout(rect=(0, 0, 1, 0.96))
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    fig.savefig(args.out, dpi=120)
-    print(f"wrote {args.out}")
-
-    # the quantitative version of the same question
-    print("\n=== are the flips scattered, or contiguous runs? ===")
+    # --- THE DECISIVE ANALYSIS (no plotting needed) ------------------------------------
+    print("=== are the flips SCATTERED noise, or CONTIGUOUS runs? ===")
+    all_runs: list[int] = []
     for t in uniq:
         m = te_tr == t
         o = np.argsort(te_fr[m])
         flip = (err[m][o] > 90).astype(int)
+        seg = t.split("/")[-1].split("::")[0]
+        tid = t.split("::")[-1]
         if not flip.any():
+            print(f"  {seg:>6s} track {tid:>3s}: clean")
             continue
         runs, cur = [], 0
         for v in flip:
@@ -133,11 +107,52 @@ def main() -> int:
                 runs.append(cur); cur = 0
         if cur:
             runs.append(cur)
-        seg = t.split("/")[-1].split("::")[0]
-        print(f"  {seg:>6s} track {t.split('::')[-1]:>3s}: {flip.sum():3d} flipped in "
-              f"{len(runs):2d} run(s), longest={max(runs):3d} frames")
-    print("\n  longest run ~1-2  => scattered noise, a filter will fix it")
-    print("  longest run  >20  => confidently backwards for a stretch; needs a better cue")
+        all_runs += runs
+        verdict = "SCATTERED (a filter fixes this)" if max(runs) <= 3 else \
+                  "CONTIGUOUS -- confidently backwards; NO filter can fix this"
+        print(f"  {seg:>6s} track {tid:>3s}: {flip.sum():3d} flipped in {len(runs):2d} run(s), "
+              f"longest={max(runs):3d} frames   {verdict}")
+
+    if all_runs:
+        a = np.array(all_runs)
+        print(f"\n  runs: n={len(a)}  median={np.median(a):.0f}  longest={a.max()}  "
+              f"| {100*(a<=3).mean():.0f}% of runs are <=3 frames")
+        print("  longest ~1-3  => scattered noise; a (world-space) temporal filter will fix it")
+        print("  longest  >20  => a real visibility failure; needs a better cue, not a filter")
+
+    # --- optional plot -----------------------------------------------------------------
+    if plt is None:
+        return 0
+
+    n = len(uniq)
+    cols = 3
+    rows = int(np.ceil(n / cols))
+    fig, axes = plt.subplots(rows, cols, figsize=(5 * cols, 2.6 * rows), squeeze=False)
+    for k, t in enumerate(uniq):
+        ax = axes[k // cols][k % cols]
+        m = te_tr == t
+        o = np.argsort(te_fr[m])
+        f = te_fr[m][o]
+        gt, pr, e = ang_t[m][o], ang_p[m][o], err[m][o]
+        flip = e > 90
+        ax.plot(f, gt, color="0.7", lw=2.5, label="ground truth")
+        ax.plot(f, pr, color="tab:blue", lw=1.0, label="predicted")
+        if flip.any():
+            ax.scatter(f[flip], pr[flip], color="red", s=14, zorder=5, label="180-deg flip")
+        ax.set_title(f"{t.split('/')[-1].split('::')[0]} track {t.split('::')[-1]}"
+                     f"   ({100*flip.mean():.0f}% flipped)", fontsize=9)
+        ax.set_ylim(-190, 190)
+        ax.tick_params(labelsize=7)
+        if k == 0:
+            ax.legend(fontsize=7, loc="lower left")
+    for k in range(n, rows * cols):
+        axes[k // cols][k % cols].axis("off")
+    fig.suptitle("Predicted vs GT heading per held-out track — RED = 180-deg flip. "
+                 "Speckle => filterable.  Solid blocks => confidently backwards.", fontsize=10)
+    fig.tight_layout(rect=(0, 0, 1, 0.96))
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(args.out, dpi=120)
+    print(f"\nwrote {args.out}")
     return 0
 
 

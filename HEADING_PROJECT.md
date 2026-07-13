@@ -231,13 +231,33 @@ python -m tools.heading.predict --segment <UNLABELLED_SEG> --head data/heading/h
 |---|---|
 | Geometry vs human locks | **100%** on 11,084 instances. **Trustworthy.** |
 | Heading head, 1st attempt | *"7.0° / 91.8% flank"* — **VOID**: trained on background crops (§6). |
-| Heading head, corrected crops | **PENDING** — the number to get. |
+| **Heading head, corrected crops** | **✅ 5.1° median / 2.8% flips / 97.0% flank / 100% after track-vote** |
 
-The first run's per-track breakdown is still informative about *method*: flips were scattered
-(≤3% on most zebra tracks) → **a track-level majority vote works** (an animal's head does not
-swap ends mid-track). The one 100%-flipped track was the **giraffe** — the only non-zebra, and
-(being a single track) it landed entirely in *test*, so the model had **never seen a giraffe**
-and inverted it. Whether that survives the crop fix is unknown.
+**Trained: frozen DINOv3 ViT-L/16 (2048-d = CLS ‖ mean-pooled patches) → 512-unit MLP →
+(cos θ, sin θ). Held out 13 of 68 TRACKS (2400 test / 8785 train).**
+
+```
+median angular error :    5.1 deg
+180-deg flips (>90)  :    2.8%
+FLANK accuracy       :   97.0%      <- the re-ID number (chance 50%)
+after track-vote     :  100.0%      (13/13 tracks)
+tracks >50% flipped  :    0/13
+```
+
+**THE KEY EVIDENCE — the giraffe.** The single non-zebra track (100 frames) landed entirely in
+*test*, so the model **never saw a giraffe in training**:
+
+* with the buggy background crops it was **100% backwards** (inverted on every frame);
+* with correct crops it is **0.0% flipped — perfect**.
+
+That is the proof the fix was real. The old head was exploiting a **scene/drone shortcut** that
+shattered on an unseen video; the corrected head **looks at the animal**, so it generalises to a
+species it was never trained on. The accuracy bump is secondary — *the giraffe flipping to 100%
+correct is the result.*
+
+**Failures are now scattered noise, not confusion** (0–2% on nearly every track), which is why a
+**track-level majority vote reaches 100%**: an animal's head does not swap ends mid-track. Only
+`seg1 track 4` is weak (28% per-frame) and even it votes correctly.
 
 ---
 

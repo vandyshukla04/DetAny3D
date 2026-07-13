@@ -1,5 +1,22 @@
 """Temporal heading tracking: turn per-frame guesses into one coherent trajectory.
 
+!! STATUS: DOES NOT HELP IN IMAGE SPACE. Measured on held-out tracks:
+!!     per-frame        : 4.0 deg / 3.1% flips / 96.8% flank
+!!     + this tracker   : 3.8 deg / 3.7% flips / 96.7% flank   (i.e. no gain)
+!!
+!! WHY (this is the useful part -- do not repeat the mistake):
+!! The synthetic tests below all pass, because they assume the underlying signal is
+!! temporally smooth. **In IMAGE space it is not.** The drone moves, so an animal's
+!! image-space heading changes even when the animal does not; and near head-on views the
+!! projected heading vector is short and ill-conditioned, so the angle legitimately swings.
+!! Smoothing a signal that is not smooth does not denoise it -- it blurs it.
+!!
+!! The physically smooth quantity is the animal's heading AZIMUTH IN WORLD SPACE: that is
+!! what cannot change abruptly. Converting image-angle -> world azimuth needs the camera
+!! geometry, which `features.npz` does not carry (only track/frame/species) -- but
+!! `predict.py` HAS it. **So world-space tracking belongs at inference (predict.py), not in
+!! the feature-space eval.** Until then, the honest per-frame number stands.
+
 THE PHYSICAL PRIOR
 ------------------
 An animal cannot swap its head and tail between two consecutive frames. A ~180-degree

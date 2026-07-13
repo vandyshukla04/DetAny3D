@@ -172,17 +172,35 @@ def main() -> int:
     fully = int((per_track > 0.5).sum())
     print(f"\n  tracks >50% flipped : {fully}/{len(per_track)}")
 
-    # Track-level majority vote: one heading decision per animal, not per frame.
+    # --- (a) track-level majority vote: ONE heading for the whole animal ---------------
+    # Simple, and it scores well here only because grazing zebras barely turn. It is wrong
+    # BY CONSTRUCTION for an animal that turns around mid-track, so it is not the answer.
     voted_ok = 0
+    n_tracks = len(np.unique(te_tracks))
     for t in np.unique(te_tracks):
         m = te_tracks == t
-        pred_flank = np.bincount(flank_of(ang_p[m]), minlength=2).argmax()
-        true_flank = np.bincount(flank_of(ang_t[m]), minlength=2).argmax()
-        voted_ok += int(pred_flank == true_flank)
-    print(f"  FLANK accuracy after track-vote : {100*voted_ok/len(np.unique(te_tracks)):5.1f}% "
-          f"({voted_ok}/{len(np.unique(te_tracks))} tracks)")
-    if fully:
-        print("  NOTE: voting cannot rescue a track that is wholly backwards -- those need a better cue.")
+        voted_ok += int(np.bincount(flank_of(ang_p[m]), minlength=2).argmax()
+                        == np.bincount(flank_of(ang_t[m]), minlength=2).argmax())
+    print(f"  FLANK after track-vote     : {100*voted_ok/n_tracks:5.1f}% ({voted_ok}/{n_tracks} tracks)"
+          f"   [fragile: assumes the animal never turns]")
+
+    # --- (b) TEMPORAL TRACKING: kill impossible 180-deg jumps, keep genuine turns -------
+    from tools.heading.track import track_headings
+
+    te_frames = d["frame"][te]
+    ang_s = ang_p.copy()
+    for t in np.unique(te_tracks):
+        m = te_tracks == t
+        ang_s[m] = track_headings(te_frames[m], ang_p[m])
+
+    err_s = np.abs(np.degrees(np.arctan2(np.sin(ang_s - ang_t), np.cos(ang_s - ang_t))))
+    flank_s = (flank_of(ang_s) == flank_of(ang_t)).mean()
+    print(f"\n=== TEMPORALLY TRACKED (per frame, but flip-corrected + smoothed) ===")
+    print(f"  median angular error : {np.median(err_s):6.1f} deg   (was {np.median(err):.1f})")
+    print(f"  180-deg flips (>90)  : {100*(err_s>90).mean():6.1f}%   (was {100*(err>90).mean():.1f}%)")
+    print(f"  FLANK accuracy       : {100*flank_s:6.1f}%   (was {100*flank_acc:.1f}%)")
+    print(f"  -> keeps a PER-FRAME heading (so a turning animal is still handled),")
+    print(f"     unlike the track-vote which collapses the animal to one direction.")
     return 0
 
 

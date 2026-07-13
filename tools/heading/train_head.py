@@ -52,6 +52,7 @@ def main() -> int:
     ap.add_argument("--epochs", type=int, default=60)
     ap.add_argument("--hidden", type=int, default=512)
     ap.add_argument("--lr", type=float, default=1e-3)
+    ap.add_argument("--batch", type=int, default=256)
     ap.add_argument("--holdout-species", default=None,
                     help="train on everything else, test on this species (the gap test)")
     ap.add_argument("--device", default="cpu")
@@ -97,21 +98,33 @@ def main() -> int:
     Xte = torch.tensor((X[te] - mu) / sd, device=args.device)
     Yte = Y[te]
 
-    net = nn.Sequential(
-        nn.Linear(X.shape[1], args.hidden), nn.GELU(), nn.Dropout(0.2),
-        nn.Linear(args.hidden, 2),
-    ).to(args.device)
+    from tools.heading.model import HEAD_VERSION, build_head
+    net = build_head(X.shape[1], args.hidden).to(args.device)
     opt = torch.optim.AdamW(net.parameters(), lr=args.lr, weight_decay=1e-4)
+
+    # MINI-BATCH training. The previous version did ONE full-batch step per "epoch" -- i.e.
+    # 60 gradient steps in total, which is badly undertrained. This is ~epochs * (N/batch)
+    # steps (thousands), with a cosine LR schedule.
+    n = Xtr.shape[0]
+    steps_per_epoch = max(1, n // args.batch)
+    sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs * steps_per_epoch)
 
     for ep in range(args.epochs):
         net.train()
-        opt.zero_grad()
-        p = torch.nn.functional.normalize(net(Xtr), dim=-1)   # onto the unit circle
-        loss = (1 - (p * Ytr).sum(-1)).mean()                 # cosine loss on the angle
-        loss.backward()
-        opt.step()
-        if ep % 20 == 0 or ep == args.epochs - 1:
-            print(f"  epoch {ep:3d}  loss {loss.item():.4f}")
+        perm = torch.randperm(n, device=args.device)
+        tot = 0.0
+        for b in range(steps_per_epoch):
+            sel = perm[b * args.batch: (b + 1) * args.batch]
+            opt.zero_grad()
+            p = torch.nn.functional.normalize(net(Xtr[sel]), dim=-1)   # onto the unit circle
+            loss = (1 - (p * Ytr[sel]).sum(-1)).mean()                 # cosine loss on the angle
+            loss.backward()
+            opt.step()
+            sched.step()
+            tot += float(loss)
+        if ep % 10 == 0 or ep == args.epochs - 1:
+            print(f"  epoch {ep:3d}  loss {tot/steps_per_epoch:.4f}  "
+                  f"({(ep+1)*steps_per_epoch} steps)")
 
     if args.save:
         args.save.parent.mkdir(parents=True, exist_ok=True)
@@ -120,6 +133,7 @@ def main() -> int:
                 "state_dict": net.state_dict(),
                 "in_dim": int(X.shape[1]),
                 "hidden": args.hidden,
+                "head_version": HEAD_VERSION,
                 # The head is trained on NORMALISED features, so predict.py must apply the
                 # exact same transform. Shipping mu/sd with the weights makes that impossible
                 # to get wrong.

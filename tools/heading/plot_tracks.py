@@ -66,8 +66,8 @@ def main() -> int:
     Xtr = torch.tensor((X[trn] - mu) / sd, device=args.device)
     Ytr = torch.tensor(Y[trn], device=args.device)
 
-    net = nn.Sequential(nn.Linear(X.shape[1], args.hidden), nn.GELU(), nn.Dropout(0.2),
-                        nn.Linear(args.hidden, 2)).to(args.device)
+    from tools.heading.model import build_head
+    net = build_head(X.shape[1], args.hidden).to(args.device)
     opt = torch.optim.AdamW(net.parameters(), lr=1e-3, weight_decay=1e-4)
     for _ in range(args.epochs):
         net.train(); opt.zero_grad()

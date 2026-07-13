@@ -1,4 +1,4 @@
-"""Run the trained heading head on an UNLABELLED segment and draw what it thinks.
+"""Render the heading + flank tag on an UNLABELLED segment.  NO 3D BOX.
 
     python -m tools.heading.predict \
         --segment /storage3/.../WildBox/DJI_2024.../seg5 \
@@ -6,57 +6,73 @@
         --out     data/heading/vis/seg5 \
         --every 10 --device cuda
 
-For every animal in every Nth frame this renders:
-  * the 3D box wireframe,
-  * a RED arrow from the body centre toward the predicted HEAD,
-  * the derived flank tag (LEFT / RIGHT) -- the thing re-ID actually consumes,
-  * the model's confidence.
+Draws, per animal:
+  * the 2D detection box (this is what the crop came from -- it IS judged),
+  * a RED arrow from the animal's centre toward the predicted HEAD,
+  * the flank tag  LEFT / RIGHT  + confidence  -- the thing re-ID consumes.
 
-WHY THIS IS THE REAL TEST
--------------------------
-Held-out metrics are computed on zebra tracks from the same few videos. Rendering on
-segments the model has never seen -- different species, different flight, no labels --
-is the only way to see the failure modes the aggregate hides. Look specifically for the
-arrow pointing at the TAIL: that is the 180-degree confusion, and it is the failure that
-flips the flank tag and would poison a re-ID gallery.
+WHY NO 3D BOX
+-------------
+The 3D box's ROTATION is untrustworthy (untrained 6D head; GT rotation has arbitrary PCA/SVD
+signs -- see HEADING_PROJECT.md §4c). Drawing it invites you to judge an orientation that is
+meaningless, and an earlier version of this script also *used* those broken axes to pick the
+front face, which could flip the flank tag on its own.
 
-Uses `rotations="raw"`, i.e. the same per-frame PCA rotations WildBox itself was built
-from -- so what you see is exactly what a WildBox-time consumer would get.
+So the flank now comes from `visibility.py`:  image heading (DINOv3) + CAMERA + gravity.
+The camera is essential -- it lifts the 2D angle into a world direction AND decides which side
+faces the viewer. Only the BOX is dropped. Verified: identical to the box-derived flank on
+614/614 instances.
+
+WHAT TO LOOK FOR
+----------------
+1. Does the red arrow point at the HEAD?
+2. Is the flank tag STABLE across consecutive frames?
+3. THE PHYSICS CHECK: the flank may only switch when the animal passes through a head-on /
+   tail-on view, i.e. when confidence -> 0. A switch at HIGH confidence is impossible -- an
+   animal cannot swap which side faces you while standing broadside. That is a label-free
+   error detector; it needs no ground truth.
 """
 from __future__ import annotations
 
 import argparse
+import math
 from pathlib import Path
 
 import numpy as np
 
-from tools.heading.conventions import corners_of, face_centers_world
-from tools.heading.frame import (
-    face_map,
-    frame_from_front_face,
-    horizontal_faces,
-    sign_up_toward_camera,
-    world_up_from_boxes,
-)
+from tools.heading.frame import sign_up_toward_camera, world_up_from_boxes
 from tools.heading.io import load_segment
+from tools.heading.visibility import visible_flank
 
 DEFAULT_MODEL = "facebook/dinov3-vitl16-pretrain-lvd1689m"
 
-EDGES = [(0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 6), (6, 7), (7, 4),
-         (0, 4), (1, 5), (2, 6), (3, 7)]
-
 
 def load_head(path: Path, device: str):
+    """Load a trained head. The architecture comes from tools.heading.model -- never rebuild
+    it by hand here, or training and inference silently drift apart."""
     import torch
-    import torch.nn as nn
+
+    from tools.heading.model import HEAD_VERSION, build_head
 
     ck = torch.load(path, map_location=device, weights_only=False)
-    net = nn.Sequential(
-        nn.Linear(ck["in_dim"], ck["hidden"]), nn.GELU(), nn.Dropout(0.2),
-        nn.Linear(ck["hidden"], 2),
-    ).to(device).eval()
+    got = ck.get("head_version", 1)
+    if got != HEAD_VERSION:
+        raise RuntimeError(
+            f"checkpoint {path} was written by head_version={got}, but this code is "
+            f"v{HEAD_VERSION}. Retrain (train_head.py --save) rather than force a load."
+        )
+    net = build_head(ck["in_dim"], ck["hidden"]).to(device).eval()
     net.load_state_dict(ck["state_dict"])
     return net, ck["mu"], ck["sd"]
+
+
+def _arrow(draw, x, y, ang, length, colour, width):
+    ex, ey = x + length * math.cos(ang), y + length * math.sin(ang)
+    draw.line([(x, y), (ex, ey)], fill=colour, width=width)
+    for s in (+1, -1):
+        a = ang + s * math.radians(150)
+        draw.line([(ex, ey), (ex + 0.3 * length * math.cos(a),
+                              ey + 0.3 * length * math.sin(a))], fill=colour, width=width)
 
 
 def main() -> int:
@@ -67,15 +83,8 @@ def main() -> int:
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--model", default=DEFAULT_MODEL)
     ap.add_argument("--device", default="cuda")
-    ap.add_argument("--every", type=int, default=10, help="render every Nth frame")
+    ap.add_argument("--every", type=int, default=10)
     ap.add_argument("--rotations", default="raw", choices=["raw", "canonical"])
-    ap.add_argument(
-        "--legacy-vggt-crops", action="store_true",
-        help="COMPAT SHIM -- DELETE ONCE THE HEAD IS RETRAINED. Crop using the OLD "
-             "518-space bbox (i.e. the wrong, background-ish crop) so that a head trained "
-             "before the io.py scale fix sees its own input distribution. Drawing is still "
-             "done correctly in full-res. Use ONLY to view a pre-fix checkpoint.",
-    )
     args = ap.parse_args()
 
     import torch
@@ -91,23 +100,14 @@ def main() -> int:
     proc = AutoImageProcessor.from_pretrained(args.model)
     dino = AutoModel.from_pretrained(args.model).to(args.device).eval()
 
+    # Only the box AXES feed the gravity consensus (their signs -- the broken part -- are
+    # never trusted). Positions come from the box centres. No box rotation reaches the output.
     up_un = world_up_from_boxes(np.concatenate([t.rotations for t in seg.tracks.values()]))
     args.out.mkdir(parents=True, exist_ok=True)
 
-    # COMPAT SHIM (see --legacy-vggt-crops): io.py now rescales bbox_2d from VGGT's 518x294
-    # space to the frame's true resolution. A head trained BEFORE that fix expects the old,
-    # un-rescaled box. Undo the rescale for CROPPING only -- drawing stays in full-res.
-    crop_scale = 1.0
-    if args.legacy_vggt_crops:
-        cam0 = seg.cameras[sorted(seg.cameras)[0]]
-        with Image.open(seg.frame_path(cam0.frame_index)) as im:
-            crop_scale = im.size[0] / float(cam0.width)          # e.g. 1920/1920 == 1 after fix
-        # cam0.width is ALREADY rescaled, so recover VGGT space from the known long side 518
-        crop_scale = 518.0 / float(cam0.width)
-        print(f"LEGACY CROPS: cropping in VGGT space (scale {crop_scale:.3f}); drawing full-res")
+    history: dict[str, list[tuple[int, str, float]]] = {}
 
-    frames = sorted(seg.cameras)[:: args.every]
-    for fidx in frames:
+    for fidx in sorted(seg.cameras)[:: args.every]:
         cam = seg.cameras[fidx]
         fp = seg.frame_path(fidx)
         if not fp.is_file():
@@ -121,78 +121,54 @@ def main() -> int:
                 i = tr.index_of_frame(fidx)
             except KeyError:
                 continue
-
-            crop_box = list(tr.bbox_2d[i] * crop_scale)   # crop_scale == 1.0 unless legacy
-            crop = square_crop(img, crop_box, 0.15)
+            crop = square_crop(img, list(tr.bbox_2d[i]), 0.15)
             if crop is None:
                 continue
 
-            # --- DINOv3 -> head -> predicted heading angle (image space) -------------
+            # DINOv3 -> head -> heading angle in IMAGE space
             pil = Image.fromarray(crop).resize((224, 224), Image.BICUBIC)
             with torch.no_grad():
-                out = dino(**proc(images=[pil], return_tensors="pt").to(args.device)).last_hidden_state
-                feat = torch.cat([out[:, 0], out[:, 1:].mean(1)], dim=-1).float().cpu().numpy()
-                z = torch.tensor((feat - mu) / sd, device=args.device)
-                v = torch.nn.functional.normalize(net(z), dim=-1)[0].cpu().numpy()
+                h = dino(**proc(images=[pil], return_tensors="pt").to(args.device)).last_hidden_state
+                f = torch.cat([h[:, 0], h[:, 1:].mean(1)], -1).float().cpu().numpy()
+                v = torch.nn.functional.normalize(
+                    net(torch.tensor((f - mu) / sd, device=args.device)), dim=-1)[0].cpu().numpy()
             ang = float(np.arctan2(v[1], v[0]))
 
-            # --- angle -> front face: pick the candidate whose projected direction
-            #     from the body centre best matches the predicted heading -------------
-            R, ctr, dims = tr.rotations[i], tr.centers[i], tr.dimensions[i]
+            # image angle + CAMERA + gravity -> flank   (no box rotation involved)
             cam_c = -cam.extrinsic[:, :3].T @ cam.extrinsic[:, 3]
-            up = sign_up_toward_camera(up_un, ctr, cam_c)
-            body_uv = cam.project(cam.world_to_cam(ctr))[0]
-            fc = face_centers_world(ctr, dims, R)
+            up_w = sign_up_toward_camera(up_un, tr.centers[i], cam_c)
+            up_cam = cam.rotate_world_to_cam(up_w)[0]
+            p_cam = cam.world_to_cam(tr.centers[i])[0]        # POSITION only
+            fl = visible_flank(ang, up_cam, p_cam)
+            history.setdefault(tid, []).append((fidx, fl.side, fl.confidence))
 
-            best, best_cos = None, -2.0
-            for f in horizontal_faces(R, up):
-                p_cam = cam.world_to_cam(fc[f])[0]
-                if p_cam[2] <= 1e-6:
-                    continue
-                d = cam.project(p_cam)[0] - body_uv
-                n = float(np.linalg.norm(d))
-                if n < 1e-6:
-                    continue
-                c = float(np.cos(ang) * d[0] / n + np.sin(ang) * d[1] / n)
-                if c > best_cos:
-                    best, best_cos = f, c
-            if best is None:
-                continue
-
-            fr = frame_from_front_face(R, up, best)
-            fm = face_map(R, fr)
-
-            # --- box wireframe ------------------------------------------------------
-            cc = cam.world_to_cam(corners_of(ctr, dims, R))
-            if np.any(cc[:, 2] <= 1e-6):
-                continue                                    # box behind the camera
-            uv = cam.project(cc)
-            for a, b in EDGES:
-                draw.line([tuple(uv[a]), tuple(uv[b])], fill=(80, 200, 255), width=2)
-
-            # --- heading arrow: body centre -> predicted HEAD ------------------------
-            head_uv = cam.project(cam.world_to_cam(fc[best]))[0]
-            draw.line([tuple(body_uv), tuple(head_uv)], fill=(255, 40, 40), width=4)
-            r = 5
-            draw.ellipse([head_uv[0] - r, head_uv[1] - r, head_uv[0] + r, head_uv[1] + r],
-                         fill=(255, 40, 40))
-
-            # --- which flank does the camera SEE? that IS the re-ID tag --------------
-            # In camera coords the camera sits at the origin, so a face is visible iff
-            # its outward normal points back toward the origin: n . c < 0, where c is the
-            # face centre. Test the LEFT face specifically.
-            left_c = cam.world_to_cam(fc[fm["left"]])[0]
-            left_n = cam.rotate_world_to_cam(fr.left)[0]
-            flank = "LEFT" if float(np.dot(left_n, left_c)) < 0 else "RIGHT"
-
-            x1, y1 = tr.bbox_2d[i][0], tr.bbox_2d[i][1]
+            # ---- draw: 2D box + heading arrow + tag (NO 3D box) ----
+            x1, y1, x2, y2 = tr.bbox_2d[i]
+            draw.rectangle([x1, y1, x2, y2], outline=(80, 200, 255), width=2)
+            cx, cy = (x1 + x2) / 2, (y1 + y2) / 2
+            _arrow(draw, cx, cy, ang, 0.45 * max(x2 - x1, y2 - y1), (255, 40, 40), 4)
+            colour = (0, 255, 120) if fl.confidence > 0.35 else (255, 200, 0)
             draw.text((x1, max(0, y1 - 12)),
-                      f"t{tid} {flank} conf={best_cos:.2f}", fill=(255, 255, 0))
+                      f"t{tid} {fl.side} {fl.confidence:.2f}", fill=colour)
 
         canvas.save(args.out / f"frame_{fidx:06d}.jpg", quality=90)
 
-    print(f"wrote {len(frames)} annotated frames -> {args.out}")
-    print("Look for: the RED arrow pointing at the TAIL -- that is the 180-deg failure.")
+    # ---- the label-free physics check ----
+    print(f"\nwrote frames -> {args.out}")
+    print("\n=== PHYSICS CHECK: a flank may only switch when edge-on (low confidence) ===")
+    bad_total = 0
+    for tid, seq in sorted(history.items()):
+        sw = [k for k in range(1, len(seq)) if seq[k][1] != seq[k - 1][1]]
+        bad = [k for k in sw if seq[k][2] > 0.35 and seq[k - 1][2] > 0.35]
+        bad_total += len(bad)
+        note = ""
+        if bad:
+            note = "  <-- IMPOSSIBLE: flipped while broadside, at frames " + \
+                   ",".join(str(seq[k][0]) for k in bad[:5])
+        print(f"  track {tid:>3s}: {len(seq):3d} frames, {len(sw):2d} switch(es), "
+              f"{len(bad):2d} impossible{note}")
+    print(f"\n  impossible switches: {bad_total}  (should be 0)")
+    print("  A switch at LOW confidence is fine -- the animal turned through head-on/tail-on.")
     return 0
 
 

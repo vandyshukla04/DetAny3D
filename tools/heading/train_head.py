@@ -55,6 +55,11 @@ def main() -> int:
     ap.add_argument("--holdout-species", default=None,
                     help="train on everything else, test on this species (the gap test)")
     ap.add_argument("--device", default="cpu")
+    ap.add_argument("--save", type=Path, default=None,
+                    help="write the trained head (+ feature normalisation) for predict.py")
+    ap.add_argument("--all-data", action="store_true",
+                    help="train on EVERY track (no held-out split). Use only for the final "
+                         "model you ship -- the reported metrics then mean nothing.")
     args = ap.parse_args()
 
     import torch
@@ -65,7 +70,11 @@ def main() -> int:
     print(f"{len(X)} samples, {X.shape[1]}-d features, species={dict(zip(*np.unique(sp, return_counts=True)))}")
 
     # --- split by TRACK (never by frame: adjacent frames are near-duplicates) ---
-    if args.holdout_species:
+    if args.all_data:
+        tr_mask = np.ones(len(X), dtype=bool)
+        te = np.zeros(len(X), dtype=bool)
+        print(f"--all-data: training on ALL {len(X)} samples; held-out metrics are meaningless")
+    elif args.holdout_species:
         te = sp == args.holdout_species
         tr_mask = ~te
         print(f"holding out species={args.holdout_species}: {te.sum()} test / {tr_mask.sum()} train")
@@ -78,8 +87,8 @@ def main() -> int:
         tr_mask = ~te
         print(f"held-out {len(test_tracks)}/{len(tracks)} TRACKS: {te.sum()} test / {tr_mask.sum()} train")
 
-    if te.sum() == 0 or tr_mask.sum() == 0:
-        print("empty split; nothing to do")
+    if tr_mask.sum() == 0:
+        print("empty training split; nothing to do")
         return 1
 
     mu, sd = X[tr_mask].mean(0, keepdims=True), X[tr_mask].std(0, keepdims=True) + 1e-6
@@ -103,6 +112,30 @@ def main() -> int:
         opt.step()
         if ep % 20 == 0 or ep == args.epochs - 1:
             print(f"  epoch {ep:3d}  loss {loss.item():.4f}")
+
+    if args.save:
+        args.save.parent.mkdir(parents=True, exist_ok=True)
+        torch.save(
+            {
+                "state_dict": net.state_dict(),
+                "in_dim": int(X.shape[1]),
+                "hidden": args.hidden,
+                # The head is trained on NORMALISED features, so predict.py must apply the
+                # exact same transform. Shipping mu/sd with the weights makes that impossible
+                # to get wrong.
+                "mu": mu.astype(np.float32),
+                "sd": sd.astype(np.float32),
+                "trained_on": {"samples": int(tr_mask.sum()),
+                               "species": {k: int(v) for k, v in
+                                           zip(*np.unique(sp[tr_mask], return_counts=True))}},
+            },
+            args.save,
+        )
+        print(f"\nsaved head -> {args.save}")
+
+    if te.sum() == 0:
+        print("(no held-out split; skipping evaluation)")
+        return 0
 
     net.eval()
     with torch.no_grad():

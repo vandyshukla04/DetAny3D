@@ -113,11 +113,43 @@ def main() -> int:
     err = np.abs(np.degrees(np.arctan2(np.sin(ang_p - ang_t), np.cos(ang_p - ang_t))))
     flank_acc = (flank_of(ang_p) == flank_of(ang_t)).mean()
 
-    print("\n=== HELD-OUT ===")
+    print("\n=== HELD-OUT (per frame) ===")
     print(f"  median angular error : {np.median(err):6.1f} deg")
     print(f"  180-deg flips (>90)  : {100*(err>90).mean():6.1f}%   <- the failure that matters")
     print(f"  FLANK accuracy       : {100*flank_acc:6.1f}%   <- the re-ID number")
     print(f"  chance               :   50.0%")
+
+    # --- Are the flips SCATTERED across frames, or concentrated in whole TRACKS? -----
+    # This decides everything. An animal's head does not swap ends mid-track, so if the
+    # flips are scattered, a track-level majority vote erases them. If instead entire
+    # tracks are confidently backwards, voting is useless and the cue itself is wrong.
+    te_tracks = tr[te]
+    print("\n=== per-track flip rate (held-out) ===")
+    per_track = []
+    for t in np.unique(te_tracks):
+        m = te_tracks == t
+        fr = float((err[m] > 90).mean())
+        per_track.append(fr)
+        name = t.split("::")[-1]
+        seg = t.split("/")[-1].split("::")[0]
+        flag = "  <-- WHOLE TRACK BACKWARDS" if fr > 0.5 else ""
+        print(f"  {seg:>18s} track {name:>3s}: {m.sum():4d} frames, {100*fr:5.1f}% flipped{flag}")
+
+    per_track = np.array(per_track)
+    fully = int((per_track > 0.5).sum())
+    print(f"\n  tracks >50% flipped : {fully}/{len(per_track)}")
+
+    # Track-level majority vote: one heading decision per animal, not per frame.
+    voted_ok = 0
+    for t in np.unique(te_tracks):
+        m = te_tracks == t
+        pred_flank = np.bincount(flank_of(ang_p[m]), minlength=2).argmax()
+        true_flank = np.bincount(flank_of(ang_t[m]), minlength=2).argmax()
+        voted_ok += int(pred_flank == true_flank)
+    print(f"  FLANK accuracy after track-vote : {100*voted_ok/len(np.unique(te_tracks)):5.1f}% "
+          f"({voted_ok}/{len(np.unique(te_tracks))} tracks)")
+    if fully:
+        print("  NOTE: voting cannot rescue a track that is wholly backwards -- those need a better cue.")
     return 0
 
 

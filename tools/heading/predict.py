@@ -69,6 +69,13 @@ def main() -> int:
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--every", type=int, default=10, help="render every Nth frame")
     ap.add_argument("--rotations", default="raw", choices=["raw", "canonical"])
+    ap.add_argument(
+        "--legacy-vggt-crops", action="store_true",
+        help="COMPAT SHIM -- DELETE ONCE THE HEAD IS RETRAINED. Crop using the OLD "
+             "518-space bbox (i.e. the wrong, background-ish crop) so that a head trained "
+             "before the io.py scale fix sees its own input distribution. Drawing is still "
+             "done correctly in full-res. Use ONLY to view a pre-fix checkpoint.",
+    )
     args = ap.parse_args()
 
     import torch
@@ -87,6 +94,18 @@ def main() -> int:
     up_un = world_up_from_boxes(np.concatenate([t.rotations for t in seg.tracks.values()]))
     args.out.mkdir(parents=True, exist_ok=True)
 
+    # COMPAT SHIM (see --legacy-vggt-crops): io.py now rescales bbox_2d from VGGT's 518x294
+    # space to the frame's true resolution. A head trained BEFORE that fix expects the old,
+    # un-rescaled box. Undo the rescale for CROPPING only -- drawing stays in full-res.
+    crop_scale = 1.0
+    if args.legacy_vggt_crops:
+        cam0 = seg.cameras[sorted(seg.cameras)[0]]
+        with Image.open(seg.frame_path(cam0.frame_index)) as im:
+            crop_scale = im.size[0] / float(cam0.width)          # e.g. 1920/1920 == 1 after fix
+        # cam0.width is ALREADY rescaled, so recover VGGT space from the known long side 518
+        crop_scale = 518.0 / float(cam0.width)
+        print(f"LEGACY CROPS: cropping in VGGT space (scale {crop_scale:.3f}); drawing full-res")
+
     frames = sorted(seg.cameras)[:: args.every]
     for fidx in frames:
         cam = seg.cameras[fidx]
@@ -103,7 +122,8 @@ def main() -> int:
             except KeyError:
                 continue
 
-            crop = square_crop(img, list(tr.bbox_2d[i]), 0.15)
+            crop_box = list(tr.bbox_2d[i] * crop_scale)   # crop_scale == 1.0 unless legacy
+            crop = square_crop(img, crop_box, 0.15)
             if crop is None:
                 continue
 

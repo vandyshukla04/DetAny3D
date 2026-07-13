@@ -1,286 +1,268 @@
-# Animal Heading for DetAny3D → side-consistent re-ID
+# Animal Heading → side-consistent re-ID  (DetAny3D / WildBox)
 
-**Status doc. Read this first.** It is written so that someone (or some context-compacted
-assistant) picking this up cold can continue without repeating the dead ends. Every claim
-here is measured, and the measurements are named so you can re-run them.
-
----
-
-## 1. The goal
-
-Make monocular 3D detection emit a **semantically meaningful animal heading** (which way
-the animal faces → **which flank the camera sees**), so re-ID can be **side-consistent**.
-
-Wildlife re-ID is viewpoint-dependent: a zebra's left stripes are a *different pattern*
-from its right. Matching a left-flank query against a right-flank gallery is a guaranteed
-miss. The existing re-ID stack (`dinov3/extract_dinov3_features.py` → per-track DINOv3
-crop features + `gallery.pt`) has no idea which side it is looking at. **That is the gap.**
-
-The deliverable is: **DetAny3D outputs box + faces**, i.e. front / back / left / right / top.
+**READ THIS FIRST.** Written so someone picking this up cold — or a context-compacted
+assistant — can continue without repeating the dead ends or re-learning the traps. Every
+number here was measured; the commands to re-measure are given.
 
 ---
 
-## 2. The diagnosis: the heading signal is absent end-to-end
+## 1. Goal
 
-All verified in code, not assumed:
-
-| Layer | State | Evidence |
-|---|---|---|
-| GT rotation | **No heading.** Raw PCA/SVD fit; singular-vector signs arbitrary. **12.4% of consecutive frames in a track flip an axis** — impossible for a real animal. | `vggt/demo_viser_tracking.py:675` |
-| GT yaw scalar | **Hardcoded `0.0` placeholder** | `detect_anything/datasets/data_creator/wildbox.py:270` |
-| `alpha` head (12 bins over 2π — *is* heading-aware) | **Actively trained against that placeholder.** `gt_alpha = -atan2(cx−cx_K, fx) + 0.0` → pure viewing-ray geometry, zero orientation content. Learns "yaw ≈ 0" for everything. | `train.py:108-110`, loss at `train.py:182` |
-| 6D rotation head | **Zero gradient** — its only loss (`chamfer_loss`) is absent from `wildbox_final.yaml:54`'s `loss_list`. Also 180°-blind (permutation-invariant corner set). Yet it is what gets exported as the box `pose`. | `train.py:193`, `train.py:310` |
-| Metrics | **Cannot see heading.** BEV AP uses a convex hull; NHD a symmetric corner Hausdorff. Both invariant to 180° flips. | `bev_ap_eval.py:61`, `class_agnostic_eval.py:41` |
-
-⇒ **Published AP is not corrupted** (every metric is flip-invariant), **but no box rotation
-in this project can be trusted for front/back.** Heading must be *re-derived*, not read off
-the box.
-
-**The good news:** DetAny3D *already has the head we need*. `alpha` is 12 bins over a full
-2π (a 180° flip lands in a different bin and IS penalised) and `loss_3d_alpha` is already
-live. Nobody ever gave it a heading to learn. **The final fix is data-side, not
-architectural.**
+Give each detected animal a **heading**, hence **which flank the camera sees**, so re-ID can
+be **side-consistent**. A zebra's left stripes are a *different pattern* from its right, so
+matching a left-flank query against a right-flank gallery is a guaranteed miss. The existing
+re-ID stack (`dinov3/extract_dinov3_features.py` → per-track DINOv3 crop features +
+`gallery.pt`) cannot tell which side it is looking at. **That is the gap.**
 
 ---
 
-## 3. What is SOLVED: the geometry (exact)
-
-`tools/heading/{conventions,frame}.py`. **17 tests green** (`python -m tools.heading.tests.test_conventions`, `..test_frame`).
-
-**The upstream face table is WRONG.** `vggt/build_canonical_atlas.py:47` labels faces 0-3 as
-`+X,-X,-Y,+Y`. Derived from the actual corner coordinates they are **`-Y,+Y,-X,+X`**. Faces
-4/5 are right. We derive the table from the corners so the mistake cannot propagate.
-Correct mapping: **`0:-Y  1:+Y  2:-X  3:+X  4:+Z  5:-Z`**.
-
-Measured on the human annotations (**11,084 instances, 8 segments, 66 tracks**):
+## 2. THE ARCHITECTURE (current — this is the important part)
 
 ```
-the true front is among our 4 horizontal candidates : 100.00%
-up / TOP, from geometry alone                       : 100.00%
-left = up x forward, given the front face           : 100.00%
+   2D box  ──►  crop  ──►  FROZEN DINOv3  ──►  small MLP  ──►  heading angle IN THE IMAGE
+                                                                        │
+                CAMERA (extrinsic+intrinsic)  ───────────────►  lift 2D angle into 3D
+                GRAVITY (up)                  ───────────────►  (heading is horizontal)
+                                                                        │
+                                                                        ▼
+                                              world heading  ──►  left = up × forward
+                                                                        │
+                                                                        ▼
+                                       which flank faces the camera  =  THE re-ID TAG
 ```
 
-⇒ **The geometry is exact, and the ENTIRE problem is one bit: which of the 4 horizontal
-faces is the head end.** Left/right is then *derived* (`left = up × forward`), never guessed.
+**The camera is load-bearing in two places**: it lifts the image angle into a world direction,
+*and* it decides visibility (the ray from animal to camera). Note a 3D direction projects to a
+**different image angle depending on where the animal sits in the frame** — so the perspective
+must be inverted properly, not treated as "image angle == world azimuth". `visibility.py` does
+this.
 
-**Do NOT reintroduce a "body axis = longest horizontal axis" heuristic.** It was tried; it
-is wrong 5.6% of the time and wrong in *every frame* for 3 tracks whose PCA box is genuinely
-wider than long. The cue picks the FACE directly, which fixes axis and sign in one step.
+**What we DROPPED: the 3D bounding box** (its rotation `R_cam` and dims). It was only ever a
+scaffold for the 2D→3D lift, and it is the one piece built on sand (§4). **Measured: the
+box-free path agrees with the box-derived flank on 614/614 = 100%.**
+*We did NOT drop the camera — the camera is essential.*
 
 ---
 
-## 4. What DOES NOT WORK (measured — do not retry)
+## 3. RESULTS (all held out BY TRACK, never by frame)
 
-* **GroundingDINO "head" prompting.** On aerial-oblique drone footage it grounds the noun
-  onto the *whole animal*: the 100%-of-crop box scored highest for **every** prompt tried
-  (`head.`, `animal head.`, `zebra head.`, `head of a zebra.`). Abstained 3/6, wrong 3/3.
-  **Domain shift, not resolution** — it failed at 149 px as well as at 69 px. Prompt/threshold
-  tuning will not fix it. (Code deleted; finding preserved in `tools/heading/__init__.py`.)
+**Frozen DINOv3 ViT-L/16 (2048-d = CLS ‖ mean-pooled patches) → 512-unit MLP → (cos θ, sin θ).
+13 of 68 tracks held out (2400 test / 8785 train).**
+
+```
+median angular error :   4.0 deg
+180-deg flips (>90)  :   3.1%          <- the failure that matters (it inverts the flank)
+FLANK accuracy       :  96.8%          <- the re-ID number   (chance = 50%)
+after track-vote     : 100.0%  (13/13) <- but fragile: assumes the animal never turns
+tracks fully backwards:  0/13
+```
+
+**Cross-species evidence (the strongest result).** The single giraffe track (100 frames, the
+only non-zebra) is held out entirely — the model **never sees a giraffe in training**:
+* with the buggy background crops (§4) it was **100% backwards**;
+* with correct crops it is **0.0% flipped — perfect**.
+That is the proof the model looks at the *animal*, not at a scene shortcut.
+
+**Where the remaining 3% lives** (`plot_tracks.py` run-length analysis):
+* 6 tracks **clean**; 6 tracks **scattered** (flip runs of 1–3 frames) → filterable noise;
+* **1 track** (`DJI_..._0007_V/seg1 track 4`): 56 flips in runs up to **20 frames** →
+  *confidently backwards for ~1–2 s*. A filter cannot fix that. Needs inspection
+  (`plot_crops.py`) — likely sustained head-on views where head-vs-tail is not visible.
+
+**Geometry (the scaffold, independently verified):** on 11,084 human-labelled instances,
+`front ∈ our 4 horizontal candidates` = 100%, `TOP` from geometry = 100%,
+`left = up × forward` = 100%. **17 tests green.**
+
+---
+
+## 4. ⚠️ TRAPS THAT ALREADY BIT US (do not re-fall)
+
+### 4a. The 518-vs-1920 scale trap  ← *cost us a completely fake result*
+VGGT runs at long-side **518**. So `cameras.json` intrinsics **and**
+`tracking_summary.json`'s `bbox_2d` are in **518×294** space, while the frames on disk are
+**1920×1080**. Nothing announces this — `cameras.json` *reports* `image_width: 518`, so it
+looks self-consistent. (The SAM3 masks, meanwhile, ARE full-res — that's how it was caught.)
+
+Cropping with an un-rescaled `bbox_2d` cuts a patch **3.7× too small in the top-left corner**
+— **pure background**. And it fails **silently**: a model trains happily on it and even scores
+well, because the wrong crop location is still a deterministic function of the animal's true
+position, so it learns **scene/drone geometry**. It reported **"7.0° / 91.8% flank" having
+never seen an animal.** *That number was void.*
+
+**Fixed once, at the source: `io.py::_frame_scale`. DO NOT REMOVE IT.**
+Verified: projected 3D box centre now lands 24 px from the SAM3 mask centroid; crop animal
+size went 69 px → **256 px**; `crops.npz` 136 MB → **346 MB** (background compresses to
+nothing; a zebra doesn't).
+
+### 4b. Ambiguous track keys
+`seg1` exists in **several videos**. Grouping or selecting by the bare string `seg1` merges
+different animals, and made a failing track look clean. Always key on the **full segment
+path**; `plot_*.py` now refuse to guess and print `<video>/<seg>`.
+(A GT-smoothness check that grouped this way "found" 30% broken labels — it was my own bug.
+Correctly grouped, **GT jumps are 1.11%**: the labels are fine, and the 3% flips are real
+model errors.)
+
+### 4c. DetAny3D's rotation is untrained (documented, NOT fixed — agreed)
+* `chamfer_loss` is **absent** from `wildbox_final.yaml:54`'s `loss_list`, so the 6D rotation
+  head gets **zero gradient** — yet it is what eval/export ships as the box `pose`
+  (`train.py:193`, `train.py:310`).
+* Even if trained, chamfer is a permutation-invariant 8-corner set distance → **180°-blind**.
+* The GT yaw is a hardcoded **`0.0`** (`data_creator/wildbox.py:270`), and `alpha` — the one
+  head that IS heading-aware (12 bins over 2π) — is trained against it (`train.py:108-110`,
+  loss at `:182`), so it learns "yaw ≈ 0" for everything.
+* The GT rotation itself has **arbitrary PCA/SVD signs** — 12.4% of consecutive frames flip an
+  axis (`vggt/demo_viser_tracking.py:675`).
+* **No metric can see any of this**: BEV AP uses a convex hull, NHD a symmetric corner
+  Hausdorff — both 180°-invariant. So **the published APs are NOT corrupted**, but **no box
+  rotation here can be trusted for front/back.** This is why §2 drops the box.
+
+---
+
+## 5. WHAT DOES NOT WORK (measured — do not retry)
+
+* **GroundingDINO "head" prompting.** On aerial-oblique footage it grounds the noun onto the
+  **whole animal**: the 100%-of-crop box scored highest for *every* prompt (`head.`,
+  `animal head.`, `zebra head.`, `head of a zebra.`). Abstained 3/6, wrong 3/3. **Domain
+  shift, not resolution** — failed at 149 px as well as 69 px. Code deleted.
 * **Mask-shape taper** ("head end narrower, hindquarters bulkier"). 97% on ONE segment, but it
-  is a function of viewing pitch/yaw, not anatomy. A cue that works for one camera geometry
-  is not a cue.
-* **Motion direction.** `velocities` in `tracking_summary.json` are never populated, and
-  finite-differencing `centers` yields nothing: the animals are **grazing** — they travel
-  ~10–25% of a body length across a whole 200-frame segment, with displacement barely
-  correlated with the body axis.
+  is a function of viewing pitch/yaw, not anatomy. Does not generalise.
+* **Motion direction.** `velocities` are never populated, and differencing `centers` gives
+  nothing: the animals **graze** — ~10–25% of a body length across a whole 200-frame segment.
+* **Temporal smoothing in IMAGE space** (`track.py`). Took flank **96.8% → 96.7%** (no gain).
+  Why: image-space heading **is not smooth** — the drone moves, and near head-on views the
+  projected heading is ill-conditioned, so the angle legitimately swings. Smoothing a
+  non-smooth signal blurs it. **The physically smooth quantity is WORLD azimuth** — so
+  temporal filtering belongs in `visibility.py`/`predict.py` (which have the camera), not in
+  the feature-space eval (`features.npz` carries no geometry).
+  *(An earlier neighbour-chained de-flipper was far worse — 96.8% → 79.0% — because a bad seed
+  frame cascaded through the whole track. The doubled-angle version in `track.py` is correct
+  in principle and passes synthetic tests; it just has nothing to gain in image space.)*
 
 ---
 
-## 5. What DOES work: the labels already existed
+## 6. WHAT DOES WORK: the labels already existed
 
 The VGGT annotator produced human face labels that were **never wired into anything**:
-
 * `track_face_locks.json` — track-level `{front, top, left}` → face id (8 segments)
 * `manual_labels.json` — **per-frame**, all six faces (26 segments)
 
-**Do not train on a face id.** Face ids rename themselves whenever the PCA signs flip. We
-convert each label to an **image-space heading angle** — the direction, in the crop, from the
-animal's centre toward its head:
-
+**Do not train on a face id** — face ids rename themselves whenever the PCA signs flip. We
+convert each label to an **image-space heading angle**:
 ```
 GT angle = atan2( project(front_face_centre) − project(box_centre) )
 ```
+a property of the *picture*, not of the box's bookkeeping. **Verified:** the human face id
+flips with the sign chaos while our derived angle stays smooth (**1.11% jumps**).
 
-That is a property of the *picture*, not of the box's bookkeeping. **Verified:** the human
-face id flips with the sign chaos while our derived angle stays **smooth (1.1% jumps >90°)**
-— i.e. the conversion provably undoes it.
-
-**Two rotation sets exist. Never mix them** (`io.py` makes you choose):
+**Two rotation sets exist — never mix them** (`io.py` forces you to choose):
 * `raw` = `vggt_results/tracking_summary.json` — per-frame PCA signs. **WildBox was built from these.**
-* `canonical` = `vggt_results/annotations/tracking_summary.json` — sign-aligned by the annotator. **The face-locks index into THESE.** Validation must use `canonical`.
+* `canonical` = `vggt_results/annotations/tracking_summary.json` — annotator sign-aligned.
+  **The face-locks index into THESE.** Validation must use `canonical`.
 
 ---
 
-## 6. ⚠️ THE 518-vs-1920 TRAP (this bit me; it will bite you)
+## 7. DATA
 
-**VGGT runs at a reduced resolution (long side 518).** So `cameras.json` stores intrinsics
-**and** `tracking_summary.json` stores `bbox_2d` in **518 × 294** space — while the frames on
-disk are **1920 × 1080**. Nothing announces this: `cameras.json`'s `image_width/height` fields
-*say* 518×294, so they look self-consistent and you assume they describe the JPEG. **They do
-not.** (The SAM3 masks, meanwhile, ARE full-res.)
+**Trainable labels: 11,185 samples / 68 tracks — 11,085 zebra + 100 giraffe.**
 
-Consuming `bbox_2d` against the full-res frame crops a patch ~**3.7×** too small in the
-top-left corner — **pure background**. And it fails **silently**: the crop is a valid image, a
-model trains happily on it, and it can even *score well* by latching onto the correlation
-between crop location and scene geometry.
+Stranded (worth ~1,200 more samples, 4 species): **rhino (12 tracks, 921) + elephant (3, 286)**
+live in the **CUT3R tree** (`/mnt/d/3DBOX/Results_13_04_26_CUT3R/.../corrected_labels/semantic_faces/`),
+which has a `camera/` **directory** and **four competing `tracking_summary.json`** files
+(`root`, `botsort`, `bytetrack`, `retracked`). **I refused to guess which one the labels key
+to** — a wrong guess is silently wrong supervision. Resolve by matching box counts / track ids
+to the label keys. **This is the cheapest next win: 4 species, zero new labelling.**
 
-**It did exactly that.** A head trained on those crops reported *"7.0° median error / 91.8%
-flank accuracy"* **while having never seen an animal.** That number is void.
-
-Fixed once, at the source: `io.py::_frame_scale` rescales intrinsics and `bbox_2d` to the
-frame's true resolution at load time. **Do not remove it.** Verified after the fix:
-projected 3D box centre lands **24 px** from the SAM3 mask centroid.
-
-**Any result produced before this fix is void and must be re-run.**
+Animal size in WildBox (max side, px): giraffe 692 · plains_zebra 228 · elephant 250 ·
+rhino 139 · grevys_zebra 99 · gazelle 98. **The labelled zebras are the small end (median 69 px)** —
+i.e. the validation set is the *hardest* slice, not a representative one.
 
 ---
 
-## 7. The approach (current)
+## 8. WHERE THINGS RUN (the parity trap)
 
-```
-DetAny3D  →  3D box (center, dims, R)      [UNCHANGED — the 5-seed results stand]
-                   ↓
-            animal crop (full-res!)
-                   ↓
-            DINOv3  (FROZEN — no fine-tuning)
-                   ↓
-            small MLP head  →  image-space heading angle (cos θ, sin θ)
-                   ↓
-            geometry (exact, §3)  →  front/back/left/right/top
-                   ↓
-            FLANK tag  →  side-consistent re-ID gallery
-```
+* **Human annotations + frames exist ONLY on local `/mnt/d/3DBOX`.** There are **no**
+  `semantic_faces/` annotations anywhere on the cluster (checked).
+* **DINOv3 exists ONLY on the cluster** (`/storage3/3DOM/vshukla/dinov3`, env `envs/dinov3`).
+* ⇒ **Ship the crops, not the dataset**: `extract_crops.py` locally → one `crops.npz`
+  (346 MB, JPEG-encoded inside the npz) → `scp` → cluster runs DINOv3.
 
-Frozen DINOv3 + a small head is **data-efficient**, which is the right regime for ~11k labels.
-No backbone retraining, no 15-hour runs.
+Unlabelled WildBox on the cluster:
+`/storage3/3DOM/vshukla/sam3/wd_data/wildbox/{archive/*,data*}/WildBox_vggtv1/WildBox/<vid>/<seg>/`
+zebra sets: `archive/data2023KABRZebras` (30 segs), `archive/202401KZebras` (9), `archive/data202307KZebras` (4).
 
-**Correctness details that are NOT cosmetic:**
-* **Square-pad crops before resize.** The target is an ANGLE; a non-uniform resize is not a
-  similarity transform — it *changes angles*. Stretching would train the head on a lie.
-* **Split by TRACK, never by frame.** Adjacent frames are near-duplicates; a frame split leaks
-  the answer and reports a beautiful, meaningless number.
-* **FLANK accuracy is the headline metric**, not mean angular error. A 20° error is harmless;
-  a **180° flip** inverts the flank and poisons the gallery. Report the flip rate.
+**GPUs:** `gpu-A40` is saturated. **`gpu-1080` node7 has a DEAD GPU** (nvidia-smi lists 7 of 8)
+→ `Error 101: invalid device ordinal`. **Use `gpu-V100` (node8)** — works. Avoid `gpu-K80`
+(Kepler `sm_37`; PyTorch 2.x dropped support). matplotlib is NOT in the `dinov3` env.
 
 ---
 
-## 8. Files
+## 9. FILES
 
 ```
 tools/heading/
-  conventions.py       corner/face geometry — SINGLE SOURCE OF TRUTH (corrects upstream)
-  frame.py             world-up + front-face -> forward/up/left   (exact; 100%)
-  io.py                loaders; raw-vs-canonical; **the 518->1920 rescale**
-  dataset.py           face label -> image-space heading angle
-  build_manifest.py    [CLI] scan all annotations -> manifest.json
-  extract_crops.py     [CLI, LOCAL/CPU] crops -> crops.npz  (data is only on /mnt/d)
-  extract_features.py  [CLI, CLUSTER/GPU] frozen DINOv3 -> features.npz
-  train_head.py        [CLI] small head; per-track flip breakdown; track-vote
-  predict.py           [CLI, GPU] render heading + flank on an UNLABELLED segment
-  tests/               17 tests, zero-dependency (`python -m tools.heading.tests.test_frame`)
+  conventions.py     corner/face geometry — SINGLE SOURCE OF TRUTH.
+                     NOTE: upstream's face table is WRONG (vggt/build_canonical_atlas.py:47
+                     calls faces 0-3 "+X,-X,-Y,+Y"; from the corners they are -Y,+Y,-X,+X).
+                     Correct: 0:-Y 1:+Y 2:-X 3:+X 4:+Z 5:-Z
+  frame.py           world-up + front-face -> forward/up/left   (verified 100%)
+  visibility.py      *** flank from heading + CAMERA + gravity, NO 3D box (100%, 614/614) ***
+  io.py              loaders; raw-vs-canonical; **the 518->1920 rescale (§4a)**
+  dataset.py         face label -> image-space heading angle (the training target)
+  build_manifest.py  [CLI] scan all annotations -> manifest.json
+  extract_crops.py   [CLI, LOCAL/CPU] crops -> crops.npz     (square-pad: a plain resize
+                                                              changes ANGLES = training on a lie)
+  extract_features.py[CLI, CLUSTER/GPU] frozen DINOv3 -> features.npz
+  train_head.py      [CLI] small head + per-track flip breakdown + track-vote
+  track.py           temporal filter — NO GAIN in image space (see §5)
+  plot_tracks.py     [CLI] per-track heading vs GT; scattered-vs-contiguous run lengths
+  plot_crops.py      [CLI] whole-track filmstrip, arrows drawn on each crop
+  tests/             17 tests, zero-dependency: python -m tools.heading.tests.test_frame
 ```
-
-**`tools/__init__.py` is load-bearing** — an unrelated `tools` package exists in site-packages,
-and Python resolves regular packages before namespace packages, so without it
-`import tools.heading` silently binds to the wrong one.
-
----
-
-## 9. Where things run, and the data-parity trap
-
-* **Human annotations + frames exist ONLY on the local `/mnt/d/3DBOX`.** There are **no**
-  `semantic_faces/` annotations anywhere on the cluster (checked).
-* **DINOv3 exists ONLY on the cluster** (`/storage3/3DOM/vshukla/dinov3`, env `envs/dinov3`).
-* ⇒ We **ship the crops, not the dataset**: `extract_crops.py` locally → one `crops.npz`
-  (~136 MB, JPEG-encoded inside the npz) → `scp` → cluster does DINOv3.
-
-Cluster data trees (note the differing shapes):
-* annotated: `.../WildBox_sam3-vggtv1_processed/WildBox/<vid>/<seg>/` (has `sam3_masks/`, `vggt_results/annotations/`)
-* unlabelled: `/storage3/3DOM/vshukla/sam3/wd_data/wildbox/{archive/*,data*}/WildBox_vggtv1/WildBox/<vid>/<seg>/`
-  — zebra sets: `archive/data2023KABRZebras` (30 segs), `archive/202401KZebras` (9), `archive/data202307KZebras` (4)
-
-**GPU note:** `gpu-A40` is usually saturated. `gpu-1080` node7 has a **dead GPU** (nvidia-smi lists
-7 of 8) → `Error 101: invalid device ordinal`. **Use `gpu-V100` (node8)** — it works. Avoid
-`gpu-K80` entirely (Kepler `sm_37`; PyTorch 2.x dropped support).
+**`tools/__init__.py` is load-bearing** — a `tools` package exists in site-packages, and Python
+resolves regular packages before namespace ones, so without it `import tools.heading` binds to
+the wrong package.
 
 ---
 
-## 10. Run book
+## 10. RUN BOOK
 
 ```bash
-# LOCAL (data lives here)
+# LOCAL (annotations + frames live here)
 python -m tools.heading.build_manifest --root /mnt/d/3DBOX --out data/heading/manifest.json
 python -m tools.heading.extract_crops  --manifest data/heading/manifest.json --out data/heading/crops.npz
-scp data/heading/crops.npz fbk-cluster:/storage3/3DOM/vshukla/DetAny3D/data/heading/
+#   -> also copied to D:\detany3d\heading\crops.npz for scp from Windows
 
 # CLUSTER (DINOv3 lives here)
 srun --partition=gpu-V100 --gres=gpu:1 --mem=32G --cpus-per-task=4 --time=00:30:00 --pty bash
 conda activate /storage3/3DOM/vshukla/envs/dinov3
 python -m tools.heading.extract_features --crops data/heading/crops.npz --out data/heading/features.npz --device cuda
-python -m tools.heading.train_head --features data/heading/features.npz              # honest eval
-python -m tools.heading.train_head --features data/heading/features.npz --all-data --save data/heading/head.pt
-python -m tools.heading.predict --segment <UNLABELLED_SEG> --head data/heading/head.pt \
-       --out data/heading/vis/zebra --every 20 --device cuda
+python -m tools.heading.train_head  --features data/heading/features.npz            # honest eval
+python -m tools.heading.plot_tracks --features data/heading/features.npz            # where it fails
+python -m tools.heading.plot_crops  --features data/heading/features.npz --crops data/heading/crops.npz \
+                                    --track '<FULL::key>' --out data/heading/track.jpg   # why it fails
+python -m tools.heading.train_head  --features data/heading/features.npz --all-data --save data/heading/head.pt
 ```
 
 ---
 
-## 11. Results
+## 11. NEXT STEPS (in value order)
 
-| run | status |
-|---|---|
-| Geometry vs human locks | **100%** on 11,084 instances. **Trustworthy.** |
-| Heading head, 1st attempt | *"7.0° / 91.8% flank"* — **VOID**: trained on background crops (§6). |
-| **Heading head, corrected crops** | **✅ 5.1° median / 2.8% flips / 97.0% flank / 100% after track-vote** |
+1. **Scale up the experiment.** Run `visibility.py` over MANY unlabelled tracks (the zebra sets
+   in §8) and check the flank tag is temporally stable and matches eyeballing. This is the
+   "does the heading descriptor actually tell us what part of the animal we see" test.
+2. **Unstick the CUT3R rhino/elephant labels** (§7) → 4 species, no new labelling.
+3. **World-space temporal filtering** inside `visibility.py` (image-space failed, §5). Should
+   erase the scattered flips → flank ~98.7%+, while still handling a turning animal (unlike
+   the track-vote).
+4. **Inspect `seg1 track 4`** with `plot_crops.py` — is it head-on (information limit) or a
+   real blind spot? Decides whether a better cue (dense patch tokens instead of mean-pooled;
+   SAM3 mask as a channel) is worth it.
+5. **Fold into DetAny3D**: replace the `0.0` yaw at `wildbox.py:270` with the predicted heading
+   so `loss_3d_alpha` (already live, already 180°-aware) finally trains. One model emits
+   box + heading, no DINOv3 at inference.
+6. **Prove the point**: re-ID accuracy on the existing `gallery.pt` **with vs without**
+   side-consistent matching. That is the number that shows heading buys something.
 
-**Trained: frozen DINOv3 ViT-L/16 (2048-d = CLS ‖ mean-pooled patches) → 512-unit MLP →
-(cos θ, sin θ). Held out 13 of 68 TRACKS (2400 test / 8785 train).**
-
-```
-median angular error :    5.1 deg
-180-deg flips (>90)  :    2.8%
-FLANK accuracy       :   97.0%      <- the re-ID number (chance 50%)
-after track-vote     :  100.0%      (13/13 tracks)
-tracks >50% flipped  :    0/13
-```
-
-**THE KEY EVIDENCE — the giraffe.** The single non-zebra track (100 frames) landed entirely in
-*test*, so the model **never saw a giraffe in training**:
-
-* with the buggy background crops it was **100% backwards** (inverted on every frame);
-* with correct crops it is **0.0% flipped — perfect**.
-
-That is the proof the fix was real. The old head was exploiting a **scene/drone shortcut** that
-shattered on an unseen video; the corrected head **looks at the animal**, so it generalises to a
-species it was never trained on. The accuracy bump is secondary — *the giraffe flipping to 100%
-correct is the result.*
-
-**Failures are now scattered noise, not confusion** (0–2% on nearly every track), which is why a
-**track-level majority vote reaches 100%**: an animal's head does not swap ends mid-track. Only
-`seg1 track 4` is weak (28% per-frame) and even it votes correctly.
-
----
-
-## 12. Next steps
-
-1. **Re-run everything with corrected crops** (§10). The animal is now ~230 px in the crop
-   instead of ~62 px, so expect a *different* (and finally meaningful) number.
-2. **Species gap.** Trainable labels are **11,085 zebra + 100 giraffe**. Rhino (12 tracks, 921
-   instances) and elephant (3 tracks, 286) labels **already exist** but are stranded in the
-   **CUT3R tree** (`/mnt/d/3DBOX/Results_13_04_26_CUT3R/.../corrected_labels/semantic_faces/`),
-   which has a `camera/` directory and **four competing `tracking_summary.json`** files
-   (`root`, `botsort`, `bytetrack`, `retracked`). **I refused to guess which one the labels key
-   to** — a wrong guess is silently wrong supervision. Resolving this = 4 species for free.
-3. **Track-level vote** into `predict.py` (one heading per animal, not per frame).
-4. **Then fold into DetAny3D**: replace the `0.0` yaw placeholder at `wildbox.py:270` with the
-   predicted heading and let `loss_3d_alpha` finally train. One model emits box + heading, no
-   DINOv3 at inference.
-5. **Prove the point**: re-ID accuracy on the existing `gallery.pt` **with vs without**
-   side-consistent matching. That is the number that shows the heading actually buys something.
-
-## 13. Known bug, documented not fixed (agreed)
-
-`chamfer_loss` is missing from `wildbox_final.yaml:54`, so DetAny3D's 6D rotation head gets
-**zero gradient** during WildBox fine-tuning, while still being what eval/export ships as the
-box `pose`. Not a blocker (we ignore the box rotation entirely) and it does **not** corrupt the
-published APs (all flip-invariant), but it is real.
+## 12. Standing lesson
+The first result (91.8%) looked great and was **entirely fake**. It was the **giraffe** — the
+one datum that didn't fit — that exposed it. Distrust clean numbers; check the outlier.

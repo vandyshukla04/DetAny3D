@@ -40,6 +40,8 @@ from pathlib import Path
 
 import numpy as np
 
+from tools.heading.cropset import load_npz
+
 from tools.heading.conventions import face_centers_world
 from tools.heading.papersub import load_segment
 
@@ -98,7 +100,7 @@ def main() -> int:
 
     from tools.heading.conventions import FACE_AXIS
 
-    d = np.load(args.labels, allow_pickle=True)
+    d = load_npz(args.labels)
     n_all = len(d["seg"])
     sel = np.arange(0, n_all, max(1, args.stride))
     print(f"{n_all} labels -> {len(sel)} after stride {args.stride}")

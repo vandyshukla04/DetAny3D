@@ -35,6 +35,8 @@ from pathlib import Path
 
 import numpy as np
 
+from tools.heading.cropset import load_npz
+
 
 def _arrow(draw, x0, y0, x1, y1, colour, width):
     draw.line([(x0, y0), (x1, y1)], fill=colour, width=width)
@@ -58,7 +60,7 @@ def main() -> int:
 
     from PIL import Image, ImageDraw
 
-    d = np.load(args.crops, allow_pickle=True)
+    d = load_npz(args.crops)
     sp, jpeg = d["species"], d["jpeg"]
     face_uv, y_face, body_px = d["face_uv"], d["y_face"], d["body_px"]
 

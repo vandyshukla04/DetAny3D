@@ -184,6 +184,62 @@ def test_empty_bins_contribute_exactly_nothing():
     assert np.isnan(_match(prof, np.zeros(B, dtype=int), Tc)), "no evidence at all must be NaN"
 
 
+def test_load_npz_materialises_and_is_not_lazy():
+    """THE BUG THAT COST HOURS, and it is silent -- it looks like ordinary array indexing.
+
+    `np.load` on a savez_compressed file returns a LAZY NpzFile: every `z[key][i]` zlib-inflates the
+    ENTIRE member before taking one element. CropSet.get() read four fields, so ONE crop cost FOUR
+    full decompressions of a 259 MB array.
+
+    MEASURED: z["jpeg"][i] = 4,113 ms per crop -> ~6.6 hours to score the held-out set. It is also
+    why bf16, the batch size and every other optimisation changed nothing: the GPU was never the
+    bottleneck, and my own benchmark missed it by calling batch() OUTSIDE the timing loop.
+
+    So: load_npz must hand back a plain dict of materialised arrays, never an NpzFile.
+    """
+    import tempfile
+    from pathlib import Path
+
+    from tools.heading.cropset import load_npz
+
+    p = Path(tempfile.mkdtemp()) / "t.npz"
+    np.savez_compressed(p, a=np.arange(1000), b=np.zeros((10, 3)))
+
+    d = load_npz(p)
+    assert isinstance(d, dict), f"load_npz returned {type(d)} -- a lazy NpzFile is the bug"
+    assert not isinstance(d, np.lib.npyio.NpzFile)
+    assert all(isinstance(v, np.ndarray) for v in d.values())
+    assert d["a"][7] == 7 and d["b"].shape == (10, 3)
+
+
+def test_cropset_never_holds_a_lazy_npzfile():
+    """Guards the same bug at the place it actually bit."""
+    import io as _io
+    import tempfile
+    from pathlib import Path
+
+    from PIL import Image
+
+    from tools.heading.cropset import CropSet
+
+    n = 3
+    jp = []
+    for _ in range(n):
+        b = _io.BytesIO()
+        Image.fromarray(np.zeros((32, 32, 3), np.uint8)).save(b, "JPEG")
+        jp.append(b.getvalue())
+    p = Path(tempfile.mkdtemp()) / "crops.npz"
+    np.savez_compressed(
+        p, jpeg=np.array(jp, dtype=object),
+        y_face=np.zeros(n, np.int8), face_uv=np.zeros((n, 4, 2), np.float32),
+        face_ids=np.tile(np.array([2, 3, 4, 5], np.int8), (n, 1)),
+        geo_axis=np.zeros(n, np.int8), species=np.array(["zebra"] * n),
+        video=np.array(["V"] * n), track=np.array(["t"] * n), frame=np.arange(n, dtype=np.int32),
+    )
+    cs = CropSet(p)
+    assert isinstance(cs.d, dict), "CropSet is holding a LAZY NpzFile -- every get() re-inflates it"
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     passed = failed = 0

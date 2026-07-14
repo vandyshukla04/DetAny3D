@@ -34,6 +34,8 @@ from pathlib import Path
 
 import numpy as np
 
+from tools.heading.cropset import load_npz
+
 DEFAULT_MODEL = "facebook/dinov3-vitl16-pretrain-lvd1689m"
 
 
@@ -80,7 +82,7 @@ def main() -> int:
     from PIL import Image
     from transformers import AutoImageProcessor, AutoModel
 
-    d = np.load(args.crops, allow_pickle=True)
+    d = load_npz(args.crops)
     jpegs = d["jpeg"]
     print(f"{len(jpegs)} crops; loading {args.model} (FROZEN) on {args.device}")
 

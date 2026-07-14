@@ -27,6 +27,8 @@ from pathlib import Path
 
 import numpy as np
 
+from tools.heading.cropset import load_npz
+
 from tools.heading.masks import build_index, check_join
 
 
@@ -67,7 +69,7 @@ def main() -> int:
 
     from concurrent.futures import ThreadPoolExecutor
 
-    d = np.load(args.crops, allow_pickle=True)
+    d = load_npz(args.crops)
     idx = build_index()
     print(f"{len(d['jpeg'])} crops | {len(idx)} videos in the archive\n")
 

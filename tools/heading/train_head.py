@@ -41,6 +41,8 @@ from pathlib import Path
 
 import numpy as np
 
+from tools.heading.cropset import load_npz
+
 
 def face_from_alpha(alpha: np.ndarray, face_alpha: np.ndarray) -> np.ndarray:
     """Snap a predicted allocentric angle to the nearest of the 4 candidate front faces."""
@@ -66,7 +68,7 @@ def main() -> int:
 
     import torch
 
-    d = np.load(args.features, allow_pickle=True)
+    d = load_npz(args.features)
     X, Y = d["X"], d["Y"]                                 # Y = (cos alpha, sin alpha)
     sp, vid = d["species"], d["video"]
     y_face, face_alpha = d["y_face"], d["face_alpha"]

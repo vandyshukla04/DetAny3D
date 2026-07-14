@@ -35,6 +35,8 @@ from pathlib import Path
 
 import numpy as np
 
+from tools.heading.cropset import load_npz
+
 from tools.heading.split import assert_matches, video_split
 from tools.heading.train_head import face_from_alpha
 
@@ -67,8 +69,8 @@ def main() -> int:
 
     from tools.heading.model import HEAD_VERSION, build_head
 
-    d = np.load(args.features, allow_pickle=True)
-    cr = np.load(args.crops, allow_pickle=True)
+    d = load_npz(args.features)
+    cr = load_npz(args.crops)
     X, Y, sp, vid = d["X"], d["Y"], d["species"], d["video"]
     y_face, face_uv, face_alpha = d["y_face"], d["face_uv"], d["face_alpha"]
 

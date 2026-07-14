@@ -25,7 +25,28 @@ from dataclasses import dataclass
 
 import numpy as np
 
-__all__ = ["CropSet", "Item"]
+__all__ = ["CropSet", "Item", "load_npz"]
+
+
+def load_npz(path) -> dict:
+    """Load an .npz INTO MEMORY. Never hand a lazy NpzFile to a loop.
+
+    `np.load` on a savez_compressed file returns a LAZY NpzFile: every `z[key][i]` zlib-inflates the
+    ENTIRE member and then takes one element. In a per-crop loop that is catastrophic and completely
+    invisible -- the code looks like ordinary array indexing.
+
+    MEASURED on crops.npz (259 MB): `z["jpeg"][i]` costs **4,113 ms**. Scoring the held-out set would
+    have taken ~6.6 hours. Materialised once: 4.1 s, then 0.001 ms per access.
+
+    This was the ENTIRE slowness of the pipeline, and it is why bf16, the batch size, and every other
+    optimisation changed nothing -- the GPU was never the bottleneck. Every consumer goes through
+    here so the bug cannot come back one file at a time.
+    """
+    z = np.load(path, allow_pickle=True)
+    try:
+        return {k: z[k] for k in z.files}
+    finally:
+        z.close()
 
 
 @dataclass(frozen=True)
@@ -55,7 +76,18 @@ class CropSet:
     """
 
     def __init__(self, path, *, mask_size: int = 224, verify_masks: bool = True):
-        self.d = np.load(path, allow_pickle=True)
+        # MATERIALISE THE ARRAYS. `np.load` on a savez_compressed file returns a LAZY NpzFile, and
+        # every `z[key][i]` zlib-inflates the ENTIRE member before taking one element. `get()` reads
+        # four fields, so one crop cost FOUR full decompressions of a 259 MB array.
+        #
+        # MEASURED: z["jpeg"][i] = 4,113 ms per crop, i.e. ~6.6 hours to score the held-out set.
+        # Materialised: 4.1 s once, then 0.001 ms per crop.
+        #
+        # This -- not the GPU -- was the entire slowness. It is also why bf16, the batch size and
+        # every other optimisation changed nothing: the forward was never the bottleneck. My own
+        # benchmark missed it because it called `batch()` once OUTSIDE the timing loop.
+        self.d = load_npz(path)
+
         self.mask_size = mask_size
         self.verify = verify_masks
         self._cache: dict[int, np.ndarray | None] = {}

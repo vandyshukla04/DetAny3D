@@ -84,15 +84,19 @@ class AxisTemplate:
 
     # ---- scoring ----
     def score_faces(self, g: np.ndarray, fg: np.ndarray, face_uv: np.ndarray,
-                    face_ids: np.ndarray, species: str) -> np.ndarray:
-        """(4,) score for "the head is at face slot j". Higher is better; NaN if unusable."""
+                    face_ids: np.ndarray, species: str, *, centred: bool = True) -> np.ndarray:
+        """(4,) score for "the head is at face slot j". Higher is better; NaN if unusable.
+
+        `centred=False` restores the ORIGINAL (broken) scoring, in which the shared "animal-ness"
+        dominates the cosine and a flat wrong-axis profile scores ~0.81 of the truth. It exists so
+        the centring ablation is a real switch rather than a story.
+        """
         T = self.templates.get(str(species))
         if T is None:
             return np.full(4, np.nan)
-        Tc = _centre(T)                                   # score the GRADIENT, not the DC
+        Tc = _centre(T) if centred else T                 # score the GRADIENT, not the DC
         Tc = Tc / max(float(np.linalg.norm(Tc)), 1e-9)    # unit template => scores comparable
-        #                                                   across species (the margin feeds the
-        #                                                   temporal decoder as a confidence)
+        #                                                   across species
 
         out = np.full(4, np.nan)
         done: set[int] = set()
@@ -105,8 +109,8 @@ class AxisTemplate:
                 continue
             # The opposite hypothesis is the SAME profile read backwards -- one computation answers
             # both ends of this axis. (Unit-tested: reversing the hypothesis reverses the profile.)
-            out[j] = _match(prof, cnt, Tc)
-            out[t] = _match(prof[::-1], cnt[::-1], Tc)
+            out[j] = _match(prof, cnt, Tc, centred=centred)
+            out[t] = _match(prof[::-1], cnt[::-1], Tc, centred=centred)
             done.update({j, t})
         return out
 
@@ -210,7 +214,8 @@ def _centre(P: np.ndarray) -> np.ndarray:
     return P - P.mean(axis=0, keepdims=True)
 
 
-def _match(prof: np.ndarray, cnt: np.ndarray, template_c: np.ndarray) -> float:
+def _match(prof: np.ndarray, cnt: np.ndarray, template_c: np.ndarray,
+           *, centred: bool = True) -> float:
     """Evidence-weighted correlation between a crop's CENTRED profile and the centred template.
 
     Both are centred, so this correlates GRADIENTS -- head->rump structure against head->rump
@@ -235,6 +240,6 @@ def _match(prof: np.ndarray, cnt: np.ndarray, template_c: np.ndarray) -> float:
     # in the mean drags the centre toward the origin -- so an animal with an occluded rump would be
     # under-centred and the DC would creep back in through the gap. We can only centre what we
     # actually see.
-    mu = (prof * w[:, None]).sum(0) / tot
+    mu = (prof * w[:, None]).sum(0) / tot if centred else 0.0
     sim = np.einsum("bd,bd->b", prof - mu, template_c)
     return float((sim * w).sum() / tot)      # empty bins have w=0 => they contribute exactly 0

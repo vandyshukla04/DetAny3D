@@ -25,7 +25,7 @@ def deg(x):
     return "—" if x is None or x != x else f"{x:.1f}°"
 
 
-def table(rows, f):
+def table(rows, f, meta=None):
     f.append("| setting | n | median err | @15° | @30° | @45° | sign | flank\\* |")
     f.append("|---|---:|---:|---:|---:|---:|---:|---:|")
     for r in rows:
@@ -35,6 +35,14 @@ def table(rows, f):
     f.append("")
     f.append("\\* flank accuracy is computed **only where a flank is actually visible** "
              "(|sin α| ≥ 0.35). Elsewhere the animal is head-on and there is no flank to name.")
+    if meta and meta.get("n_abstain"):
+        f.append("")
+        f.append(f"† The appearance rows report **n = {meta['n_total'] - meta['n_abstain']}** "
+                 f"rather than {meta['n_total']}: on **{meta['n_abstain']}** crop(s) the animal is "
+                 f"**exactly end-on**, so its body axis projects to a point, there is no profile to "
+                 f"read, and the method **abstains**. The rows that do not consult appearance "
+                 f"(`random sign`, `locomotion only`) keep every crop. This is an abstention, not a "
+                 f"dropped sample.")
     f.append("")
 
 
@@ -266,7 +274,7 @@ def main() -> int:
     m = R.get("main", {})
     f.append("## 1. Main component table — WALKING animals, held-out videos")
     f.append("")
-    table(m.get("rows", []), f)
+    table(m.get("rows", []), f, m)
     bands(m.get("bands", []), f)
     f.append("### Per species (full method)")
     f.append("")
@@ -296,7 +304,7 @@ def main() -> int:
                  "bridges whose before/after headings agree within 30°, so the animal *provably* "
                  "did not turn while it was stopped.")
         f.append("")
-        table(t.get("rows", []), f)
+        table(t.get("rows", []), f, t)
         bands(t.get("bands", []), f)
         f.append("### Per species (full method, standing)")
         f.append("")

@@ -134,7 +134,21 @@ def evaluate(crops, idx, S, d, *, tag):
                         np.ones(n, bool), None, np.zeros(n, bool), n))
 
     # --- 3. APPEARANCE, ORACLE AXIS: the axis is given; DINOv3 supplies only the sign ---
+    # ABSTENTIONS. score_faces returns NaN when there is genuinely nothing to read -- most often
+    # because the animal is exactly END-ON, so its body axis projects to a point and axis_profile
+    # has no axis to bin patches along. The head and the tail land in the same place, and there is
+    # no evidence to distinguish them.
+    #
+    # The rows that do NOT consult appearance (random sign, locomotion oracle) keep every crop; the
+    # rows that DO will therefore have a smaller n. That difference is an abstention, not a dropped
+    # sample, and the report must say so rather than leave an unexplained number in a table.
     ok = ~np.isnan(S).all(1)
+    n_abstain = int((~ok).sum())
+    if n_abstain:
+        print(f"\n  ABSTENTIONS: {n_abstain}/{n} crops carry no appearance evidence (the animal is "
+              f"end-on, so its\n  body axis projects to a point and there is no profile to read). "
+              f"The appearance rows below\n  therefore report n={int(ok.sum())}, not {n}. This is an "
+              f"abstention, not a dropped sample.")
     sv = np.where(np.isnan(S), -np.inf, S)
     t_of = np.array([opposite_slot(fid[k], int(y[k])) for k in range(n)])
     p_or = np.where(sv[np.arange(n), y] >= sv[np.arange(n), t_of], y, t_of)
@@ -195,7 +209,8 @@ def evaluate(crops, idx, S, d, *, tag):
                             "sign": float((p_full == y)[q].mean()), "flank_vis": fa})
         print(f"    {s:>9s} n={q.sum():5d}  med err {np.median(e):5.1f}d  "
               f"sign {100*(p_full == y)[q].mean():5.1f}%  flank* {100*fa:5.1f}%")
-    return {"rows": rows, "bands": band_rows, "per_species": per_species}, p_full, m
+    return ({"rows": rows, "bands": band_rows, "per_species": per_species,
+             "n_total": int(n), "n_abstain": n_abstain}, p_full, m)
 
 
 def main() -> int:

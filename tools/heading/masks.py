@@ -48,27 +48,39 @@ EXCLUDE = ("Gazelle", "gazelle")
 def build_index(archive: str = str(ARCHIVE)) -> dict[str, Path]:
     """video name -> its segment-parent dir in the archive. Scanned, never hardcoded.
 
-    Video names are globally unique across the archive, so we key on them and never need to know
-    the papersubdata-group -> archive-dataset mapping at all (zebr3 -> wildbox_tomblair, etc).
+    KEYED OFF `sam3_masks` ITSELF, NOT OFF A GUESSED DIRECTORY LAYOUT.
+    An earlier version assumed every dataset nests as `<dataset>/*/WildBox/<video>/`. The elephant,
+    giraffe and zebra trees do -- the rhino trees do not, so 78% of rhino crops silently reported
+    "no_video" and fell back to the appearance mask. The data was fine; the glob was too rigid.
+
+    `sam3_masks` is always at `<video>/<seg>/sam3_masks`, whatever sits above it. So we find those
+    and walk up two levels. That is a fact about what a segment IS, rather than a guess about how
+    someone happened to lay out a directory.
     """
     root = Path(archive)
     if not root.is_dir():
         return {}                                   # not on this machine (masks are cluster-only)
 
     idx: dict[str, Path] = {}
+    dupes: dict[str, list[Path]] = {}
     for ds in sorted(root.iterdir()):
         if not ds.is_dir() or any(e in ds.name for e in EXCLUDE):
             continue
-        for wb in ds.glob("*/WildBox"):
-            for vid in sorted(wb.iterdir()):
-                if not vid.is_dir():
-                    continue
-                if vid.name in idx:
-                    raise ValueError(
-                        f"video {vid.name} appears in two datasets ({idx[vid.name]}, {vid}). The "
-                        f"video->dataset join is not unique and must be resolved before any mask "
-                        f"is trusted.")
-                idx[vid.name] = vid
+        for sm in ds.rglob("sam3_masks"):
+            if not sm.is_dir():
+                continue
+            vid = sm.parent.parent                  # <video>/<seg>/sam3_masks
+            prev = idx.get(vid.name)
+            if prev is not None and prev != vid:
+                dupes.setdefault(vid.name, [prev]).append(vid)
+            idx[vid.name] = vid
+
+    if dupes:
+        raise ValueError(
+            f"{len(dupes)} video name(s) resolve to more than one directory, e.g. "
+            f"{next(iter(dupes.items()))}. The video->segment join is not unique, and a wrong "
+            f"resolution would hand us another animal's mask entirely. Resolve it before trusting "
+            f"any mask.")
     return idx
 
 

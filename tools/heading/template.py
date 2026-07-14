@@ -36,13 +36,16 @@ us which end is the head. Fitting it is an average.
 """
 from __future__ import annotations
 
-import io
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 import numpy as np
 
 from tools.heading.conventions import OPPOSITE_FACE
 from tools.heading.descriptors import Config, DenseExtractor, axis_profile, foreground
+
+if TYPE_CHECKING:
+    from tools.heading.cropset import CropSet
 
 __all__ = ["AxisTemplate", "opposite_slot"]
 
@@ -69,41 +72,33 @@ class AxisTemplate:
 
     # ---- fitting: an average over walking crops. No gradient descent anywhere. ----
     @classmethod
-    def fit(cls, ex: DenseExtractor, crops, idx, cfg: Config, batch: int = 32) -> "AxisTemplate":
-        from PIL import Image
-
-        jpeg, face_uv, y_face = crops["jpeg"], crops["face_uv"], crops["y_face"]
-        face_ids, species = crops["face_ids"], crops["species"]
-
+    def fit(cls, ex: DenseExtractor, crops: "CropSet", idx, cfg: Config,
+            batch: int = 32) -> "AxisTemplate":
         acc: dict[str, np.ndarray] = {}
         wts: dict[str, np.ndarray] = {}
         n: dict[str, int] = {}
 
         for b in range(0, len(idx), batch):
-            ii = [int(k) for k in idx[b: b + batch]]
-            imgs = np.stack([np.asarray(Image.open(io.BytesIO(jpeg[i])).convert("RGB")) for i in ii])
-            G = ex.grid(imgs, cfg)
+            items = crops.batch(idx[b: b + batch])
+            G = ex.grid(np.stack([it.image for it in items]), cfg)
 
-            for g, i in zip(G, ii):
-                fg = foreground(g)
-                h = int(y_face[i])                        # the TRUE head end, from motion
-                t = opposite_slot(face_ids[i], h)
-                prof, cnt = axis_profile(g, fg, face_uv[i][t], face_uv[i][h], cfg.bins)
+            for g, it in zip(G, items):
+                fg = foreground(g, it.instance)            # SAM mask when we have one
+                t = opposite_slot(it.face_ids, it.y_face)  # y_face = the TRUE head end, from motion
+                prof, cnt = axis_profile(g, fg, it.face_uv[t], it.face_uv[it.y_face], cfg.bins)
                 if not cnt.sum():
                     continue
-                sp = str(species[i])
-                if sp not in acc:
-                    acc[sp] = np.zeros_like(prof, dtype=np.float64)
-                    wts[sp] = np.zeros(cfg.bins, dtype=np.float64)
-                    n[sp] = 0
-                acc[sp] += prof * cnt[:, None]            # weight by the evidence in each bin
-                wts[sp] += cnt
-                n[sp] += 1
+                if it.species not in acc:
+                    acc[it.species] = np.zeros_like(prof, dtype=np.float64)
+                    wts[it.species] = np.zeros(cfg.bins, dtype=np.float64)
+                    n[it.species] = 0
+                acc[it.species] += prof * cnt[:, None]     # weight by the evidence in each bin
+                wts[it.species] += cnt
+                n[it.species] += 1
 
         templates = {}
         for sp, a in acc.items():
-            w = np.maximum(wts[sp], 1.0)[:, None]
-            m = a / w
+            m = a / np.maximum(wts[sp], 1.0)[:, None]
             nrm = np.linalg.norm(m, axis=1, keepdims=True)
             templates[sp] = (m / np.maximum(nrm, 1e-9)).astype(np.float32)
         return cls(cfg=cfg, templates=templates, n_fitted=n)
@@ -115,6 +110,10 @@ class AxisTemplate:
         T = self.templates.get(str(species))
         if T is None:
             return np.full(4, np.nan)
+        Tc = _centre(T)                                   # score the GRADIENT, not the DC
+        Tc = Tc / max(float(np.linalg.norm(Tc)), 1e-9)    # unit template => scores comparable
+        #                                                   across species (the margin feeds the
+        #                                                   temporal decoder as a confidence)
 
         out = np.full(4, np.nan)
         done: set[int] = set()
@@ -125,37 +124,87 @@ class AxisTemplate:
             prof, cnt = axis_profile(g, fg, face_uv[t], face_uv[j], self.cfg.bins)
             if not cnt.sum():
                 continue
-            # The opposite hypothesis is the SAME profile, read backwards -- so one computation
-            # answers both ends of this axis.
-            out[j] = _match(prof, cnt, T)
-            out[t] = _match(prof[::-1], cnt[::-1], T)
+            # The opposite hypothesis is the SAME profile read backwards -- one computation answers
+            # both ends of this axis. (Unit-tested: reversing the hypothesis reverses the profile.)
+            out[j] = _match(prof, cnt, Tc)
+            out[t] = _match(prof[::-1], cnt[::-1], Tc)
             done.update({j, t})
         return out
 
-    def predict_face(self, *args, **kw) -> tuple[int, float]:
-        """Best front-face slot, and the margin over the runner-up (a natural confidence).
+    def predict_face(self, g, fg, face_uv, face_ids, species, *,
+                     axis: int | None = None, axis_prior: float = 0.0) -> tuple[int, float]:
+        """Best front-face slot + the margin over the runner-up (a natural confidence).
 
-        The margin is what a temporal decoder consumes: a frame where the animal is head-on gives
-        a near-zero margin, and that is honest -- the cue genuinely is not visible there.
+        `axis`      -- if given (a slot on the geometric body axis), ONLY that axis' two ends are
+                       considered. GEOMETRY PROPOSES, APPEARANCE DISPOSES: picking the axis is
+                       geometry's job (the box's longest horizontal axis is right 87% of the time),
+                       and appearance is measurably bad at it. Letting appearance override geometry
+                       is what dropped the 4-way to 39% while the 2-way cue was 83.7%.
+        `axis_prior`-- soft version: add this bonus to the ends of the geometric axis instead of
+                       forbidding the other one outright. A principled middle ground, since the
+                       geometric axis is right 87% of the time, not 100%.
+
+        The MARGIN is what the temporal decoder consumes. A head-on animal yields a near-zero
+        margin, and that is honest -- the cue genuinely is not visible in that frame.
         """
-        s = self.score_faces(*args, **kw)
+        s = self.score_faces(g, fg, face_uv, face_ids, species)
         if np.isnan(s).all():
             return -1, 0.0
-        order = np.argsort(np.where(np.isnan(s), -np.inf, s))[::-1]
+
+        s = np.where(np.isnan(s), -np.inf, s).astype(np.float64)
+        if axis is not None:
+            ends = {int(axis), opposite_slot(face_ids, int(axis))}
+            if axis_prior > 0:
+                s = s + np.array([axis_prior if j in ends else 0.0 for j in range(4)])
+            else:                                          # hard restriction to the geometric axis
+                s = np.array([s[j] if j in ends else -np.inf for j in range(4)])
+
+        order = np.argsort(s)[::-1]
         best = int(order[0])
-        second = s[order[1]] if len(order) > 1 and np.isfinite(s[order[1]]) else s[best]
-        return best, float(s[best] - second)
+        runner = s[order[1]] if np.isfinite(s[order[1]]) else s[best]
+        return best, float(s[best] - runner)
 
 
-def _match(prof: np.ndarray, cnt: np.ndarray, template: np.ndarray) -> float:
-    """Evidence-weighted cosine between a crop's profile and the species template.
+def _centre(P: np.ndarray) -> np.ndarray:
+    """Remove the across-bin mean: keep the ANATOMICAL GRADIENT, drop the shared "animal-ness".
 
-    Empty bins contribute nothing rather than contributing noise -- a slice of the animal that is
-    occluded or off-frame should not vote.
+    THIS IS THE 4-WAY FIX. Every patch on an animal looks like "animal", so the cosine between any
+    profile bin and any template bin sits around 0.9 -- FOR ANY AXIS, including the wrong one. A
+    profile taken across the animal's WIDTH is nearly symmetric and flat, yet still scored high on
+    that shared DC component, so it could beat the true axis. The discriminative signal is the
+    VARIATION along the axis, not the absolute descriptors.
+
+    After centring, a flat (wrong-axis) profile collapses to ~0 while the true axis keeps its
+    head->rump structure.
+    """
+    return P - P.mean(axis=0, keepdims=True)
+
+
+def _match(prof: np.ndarray, cnt: np.ndarray, template_c: np.ndarray) -> float:
+    """Evidence-weighted correlation between a crop's CENTRED profile and the centred template.
+
+    Both are centred, so this correlates GRADIENTS -- head->rump structure against head->rump
+    structure -- and the shared "animal-ness" that used to dominate is gone.
+
+    The profile is deliberately NOT normalised to unit length. Its magnitude is its CONTRAST along
+    the axis, and contrast is itself evidence: the true body axis has a strong head->rump gradient,
+    while a profile taken across the animal's width is nearly flat. Normalising would rescale that
+    flat profile up into pure noise, which can then beat the truth by luck. Since the four
+    hypotheses are compared WITHIN ONE CROP, keeping the raw magnitude lets the true axis win on
+    alignment AND contrast together.
+
+    Empty bins contribute nothing rather than noise -- an occluded or off-frame slice of the animal
+    should not vote.
     """
     w = cnt.astype(np.float64)
     tot = w.sum()
     if tot < 1:
         return float("nan")
-    sim = np.einsum("bd,bd->b", prof, template)
-    return float((sim * w).sum() / tot)
+
+    # Centre using ONLY the bins that carry evidence. An empty bin is a ZERO ROW, and including it
+    # in the mean drags the centre toward the origin -- so an animal with an occluded rump would be
+    # under-centred and the DC would creep back in through the gap. We can only centre what we
+    # actually see.
+    mu = (prof * w[:, None]).sum(0) / tot
+    sim = np.einsum("bd,bd->b", prof - mu, template_c)
+    return float((sim * w).sum() / tot)      # empty bins have w=0 => they contribute exactly 0

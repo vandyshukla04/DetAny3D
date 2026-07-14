@@ -145,11 +145,20 @@ class Segment:
     # ---- the crop box -----------------------------------------------------------------
     @cached_property
     def scale(self) -> float:
-        """bbox_2d (518-space) -> full-res pixels. MEASURED by check_scale(), never assumed:
-        it recovers the ratio by projecting the 3D centres with the verified full-res K and
-        comparing against bbox_2d. A segment that breaks the convention raises here instead of
-        silently handing back a crop of the background."""
-        return check_scale(self)
+        """bbox_2d (518-space) -> full-res pixels.
+
+        The VALUE is exact and derived (`width / 518`); `check_scale()` independently MEASURES the
+        ratio by projecting the 3D centres with the verified full-res K, and raises if the two
+        disagree. So a segment that breaks the convention fails loudly instead of silently handing
+        back a crop of the background.
+
+        Value-derived rather than value-measured on purpose: the SAM-mask packer computes the same
+        crop box on the cluster from the archive tree, and the two must agree EXACTLY. A measured
+        median would differ in the last decimals between the two code paths and shift the crop --
+        which, for a mask, means pairing a crop with a slightly misaligned instance.
+        """
+        check_scale(self)                                # assert the convention holds
+        return next(iter(self.cameras.values())).width / VGGT_LONG_SIDE
 
     def crop_box(self, track: Track, i: int) -> np.ndarray:
         """Full-res 2D box (x1, y1, x2, y2). The detector's own `bbox_2d` -- tighter than a

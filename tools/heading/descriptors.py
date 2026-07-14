@@ -114,31 +114,37 @@ class DenseExtractor:
                 f"token features -- that would fake the token-vs-key comparison. Saw: {seen}")
 
     def grid(self, imgs: np.ndarray, cfg: Config) -> np.ndarray:
-        """(B, H, W, 3) uint8 -> (B, gh, gw, D) float32, L2-normalised."""
-        torch = self.torch
-        x = torch.from_numpy(np.ascontiguousarray(imgs)).to(self.device)
-        x = x.permute(0, 3, 1, 2).float().div_(255.0)
-        x = torch.nn.functional.interpolate(x, size=(cfg.size, cfg.size),
-                                            mode="bicubic", align_corners=False)
-        x = (x - self.mean) / self.std
+        """(B, H, W, 3) uint8 -> (B, gh, gw, D) float32, L2-normalised.
 
-        self._keys.clear()
+        The ENTIRE body runs under no_grad. It used to end outside it, so `_final_norm` (which has
+        parameters) produced a grad-carrying tensor and `.numpy()` refused. The `key` facet
+        survived only because the hook already `.detach()`es -- which meant the token facet, and
+        every layer past the first two configs, never ran at all.
+        """
+        torch = self.torch
         with torch.no_grad():
+            x = torch.from_numpy(np.ascontiguousarray(imgs)).to(self.device)
+            x = x.permute(0, 3, 1, 2).float().div_(255.0)
+            x = torch.nn.functional.interpolate(x, size=(cfg.size, cfg.size),
+                                                mode="bicubic", align_corners=False)
+            x = (x - self.mean) / self.std
+
+            self._keys.clear()
             out = self.model(pixel_values=x, output_hidden_states=True)
 
-        li = self.n_layers if cfg.layer < 0 else cfg.layer      # 1-indexed block
-        gh = gw = cfg.size // self.patch
-        n = gh * gw
+            li = self.n_layers if cfg.layer < 0 else cfg.layer  # 1-indexed block
+            gh = gw = cfg.size // self.patch
+            n = gh * gw
 
-        if cfg.facet == "key":
-            h = self._keys[li - 1]                              # hook index is 0-based
-            if h.dim() == 4:                                    # (B, heads, T, dh) -> (B, T, D)
-                h = h.permute(0, 2, 1, 3).reshape(h.shape[0], h.shape[2], -1)
-        else:
-            h = self._final_norm(out.hidden_states[li])         # [0] is the embedding, not a block
+            if cfg.facet == "key":
+                h = self._keys[li - 1]                          # hook index is 0-based
+                if h.dim() == 4:                                # (B, heads, T, dh) -> (B, T, D)
+                    h = h.permute(0, 2, 1, 3).reshape(h.shape[0], h.shape[2], -1)
+            else:
+                h = self._final_norm(out.hidden_states[li])     # [0] is the embedding, not a block
 
-        h = torch.nn.functional.normalize(h[:, -n:].float(), dim=-1)
-        return h.reshape(-1, gh, gw, h.shape[-1]).cpu().numpy()
+            h = torch.nn.functional.normalize(h[:, -n:].float(), dim=-1)
+            return h.reshape(-1, gh, gw, h.shape[-1]).cpu().numpy()
 
     def close(self) -> None:
         for h in self._hooks:
@@ -152,21 +158,54 @@ class DenseExtractor:
         self.close()
 
 
-def foreground(g: np.ndarray, *, core: float = 0.22, rim: float = 0.15) -> np.ndarray:
-    """(gh, gw, D) -> boolean foreground mask, from CENTRE-vs-CORNER prototypes.
+def _resample_mask(m: np.ndarray, gh: int, gw: int, *, occupancy: float = 0.25) -> np.ndarray:
+    """A crop-space binary mask (any resolution) -> the patch grid, by AREA OCCUPANCY.
 
-    Two things are true by construction, for free:
+    A patch is foreground if at least `occupancy` of its pixels are inside the mask. Nearest-
+    neighbour sampling would be wrong here: at 448/16 = 28x28, one patch covers 16x16 pixels, and
+    a thin structure -- a giraffe's neck, an elephant's trunk, exactly the parts that carry the
+    head signal -- can fall between sample points and vanish entirely.
+    """
+    m = np.asarray(m, dtype=bool)
+    H, W = m.shape
+    ys = (np.arange(gh + 1) * H) // gh
+    xs = (np.arange(gw + 1) * W) // gw
+    ii = np.cumsum(np.cumsum(m.astype(np.int32), axis=0), axis=1)
+    ii = np.pad(ii, ((1, 0), (1, 0)))                       # integral image -> O(1) per patch
+    area = (ii[ys[1:, None], xs[None, 1:]] - ii[ys[:-1, None], xs[None, 1:]]
+            - ii[ys[1:, None], xs[None, :-1]] + ii[ys[:-1, None], xs[None, :-1]])
+    cell = np.maximum(np.diff(ys)[:, None] * np.diff(xs)[None, :], 1)
+    return (area / cell) >= occupancy
+
+
+def foreground(g: np.ndarray, instance: np.ndarray | None = None, *,
+               core: float = 0.22, rim: float = 0.15, min_patches: int = 4) -> np.ndarray:
+    """(gh, gw, D) -> boolean foreground mask for THE TARGET ANIMAL.
+
+    If a SAM `instance` mask is given (crop-space, any resolution), it is authoritative: it is the
+    only thing that can separate the target from an OVERLAPPING NEIGHBOUR. That distinction is not
+    cosmetic -- zebras are the herd species, and with an appearance-only mask a neighbour's rump
+    gets pooled into the target's head bin, which is exactly why zebra sat at chance (52%).
+
+    Without one, fall back to CENTRE-vs-CORNER prototypes. Two things are true by construction:
       * the crop was cut from the ANIMAL'S OWN 2D box, so its CENTRE is animal;
       * after square-padding, the CORNERS are grass (or black padding).
-
     So: mean descriptor of the central patches = "animal", mean of the corners = "background", and
-    each patch goes to whichever it is closer to. Two prototypes, no model, nothing to tune.
+    each patch goes to whichever it is closer to. No model, nothing to tune. (This in turn replaced
+    a per-crop PC1 threshold, whose SIGN and THRESHOLD are both arbitrary, so the mask could invert
+    or drift from crop to crop.)
 
-    This replaces a per-crop PC1 threshold, which was mediocre for a structural reason: PC1's SIGN
-    is arbitrary and its THRESHOLD is arbitrary, so the mask could invert or drift from crop to
-    crop. Here both are pinned by facts we already know instead of estimated from the data.
+    Never returns an empty mask -- an empty mask makes every downstream profile silently zero.
     """
     gh, gw, D = g.shape
+
+    if instance is not None:
+        m = _resample_mask(instance, gh, gw)
+        if m.sum() >= min_patches:
+            return m
+        # A mask this small is not usable at this grid resolution (a distant animal). Fall through
+        # rather than return near-nothing, and let the caller see it as low evidence.
+
     r0, r1 = int(gh * (0.5 - core / 2)), int(np.ceil(gh * (0.5 + core / 2)))
     c0, c1 = int(gw * (0.5 - core / 2)), int(np.ceil(gw * (0.5 + core / 2)))
     kr, kc = max(1, int(gh * rim)), max(1, int(gw * rim))

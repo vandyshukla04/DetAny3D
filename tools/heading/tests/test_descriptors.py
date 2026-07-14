@@ -240,6 +240,51 @@ def test_cropset_never_holds_a_lazy_npzfile():
     assert isinstance(cs.d, dict), "CropSet is holding a LAZY NpzFile -- every get() re-inflates it"
 
 
+def test_paper_figure_pca_basis_must_be_shared_across_the_track():
+    """The bottom strip of the paper figure claims: THE SAME COLOUR IS THE SAME BODY PART, in every
+    frame. That claim is only true if the PCA basis is fitted ONCE over the whole track.
+
+    A per-frame PCA re-randomises the colour axes -- and their SIGNS -- every frame, so the head
+    comes out a different colour each time and the panel is decorative rather than evidence.
+    Measured here: a shared basis is ~4.6x more stable on the same body part.
+    """
+    from tools.heading.paper_fig import track_pca
+
+    rng = np.random.default_rng(0)
+    D = gh = gw = 14, 14, 14
+    D, gh, gw = 32, 14, 14
+    head = rng.normal(size=D); head /= np.linalg.norm(head)
+    rump = rng.normal(size=D); rump /= np.linalg.norm(rump)
+
+    grids, masks = [], []
+    for f in range(6):                                  # one animal, drifting across the crop
+        g = np.zeros((gh, gw, D))
+        shift = f * 1.5
+        for c in range(gw):
+            t = np.clip((c - shift) / (gw - shift - 1e-6), 0, 1)
+            g[:, c] = (1 - t) * rump + t * head + 0.03 * rng.normal(size=D)
+        g /= np.linalg.norm(g, axis=-1, keepdims=True)
+        grids.append(g)
+        masks.append(np.ones((gh, gw), bool))
+
+    def head_patch(g):                                  # follow the BODY PART, not a fixed pixel
+        sim = g @ head
+        return np.unravel_index(np.argmax(sim), sim.shape)
+
+    shared = track_pca(grids, masks)
+    cs, cp = [], []
+    for g in grids:
+        r, c = head_patch(g)
+        cs.append(shared(g)[r, c])
+        cp.append(track_pca([g], [np.ones((gh, gw), bool)])(g)[r, c])
+
+    s_shared = np.stack(cs).std(0).mean()
+    s_perframe = np.stack(cp).std(0).mean()
+    assert s_shared < s_perframe / 2, (
+        f"a shared basis ({s_shared:.3f}) is no more stable than a per-frame one "
+        f"({s_perframe:.3f}) -- the figure's central claim does not hold")
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     passed = failed = 0

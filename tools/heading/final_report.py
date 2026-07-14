@@ -144,10 +144,12 @@ def main() -> int:
             ("→ **held out, walking: TESTED ON**", data.get("crops_test_walking"),
              "20 videos the template never saw"),
             ("", None, ""),
-            ("STANDING labels (from bridges)", FN.get("bridge_labels"),
-             "WALK → STAND → WALK, heading provably unchanged"),
+            ("standing crops produced (from bridges)", data.get("crops_standing_total"),
+             "WALK → STAND → WALK, heading provably unchanged — a POOL, not a test set"),
+            ("→ from training videos: **NOT USED**", data.get("crops_standing_unused"),
+             "the template is built from WALKING crops only; these are discarded"),
             ("→ **held out, standing: TESTED ON**", data.get("crops_test_standing"),
-             "the transfer test"),
+             "**the transfer test**"),
         ]
         f.append("| | " + " | ".join(sps) + " | total | |")
         f.append("|---|" + "---:|" * (len(sps) + 1) + "---|")

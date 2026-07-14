@@ -83,8 +83,9 @@ necessary rather than optional.
 | → **used to build the template** | 587 | 187 | 285 | 440 | **1,499** | the template is a mean — nothing is trained |
 | → **held out, walking: TESTED ON** | 722 | 30 | 4,157 | 859 | **5,768** | 20 videos the template never saw |
 | | | | | | | |
-| STANDING labels (from bridges) | 2,211 | 107 | 1,741 | 778 | **4,837** | WALK → STAND → WALK, heading provably unchanged |
-| → **held out, standing: TESTED ON** | 561 | 10 | 525 | 308 | **1,404** | the transfer test |
+| standing crops produced (bridges) | 2,211 | 103 | 1,741 | 778 | **4,833** | a POOL, not a test set |
+| → from training videos: **NOT USED** | 1,650 | 93 | 1,216 | 470 | **3,429** | the template is built from *walking* crops only; these are discarded |
+| → **held out, standing: TESTED ON** | 561 | 10 | 525 | 308 | **1,404** | **the transfer test** |
 
 **In words.** WildBox holds **177,973** animal images (one animal in one frame). Only
 **25,554** of them (**14%**) come with a free heading label — the ones where the animal is

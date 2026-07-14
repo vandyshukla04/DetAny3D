@@ -311,6 +311,11 @@ def main() -> int:
     if args.stand_crops:
         st2 = CropSet(args.stand_crops)
         te2, _ = video_split(st2.species, st2.video, seed=args.seed)
+        out["data"]["crops_standing_total"] = _cnt(st2.species)
+        # The standing crops from TRAINING videos are used for NOTHING. The template is built from
+        # WALKING crops only, so these are discarded -- and the table must say so, or the pool looks
+        # like the test set.
+        out["data"]["crops_standing_unused"] = _cnt(st2.species[~te2])
         out["data"]["crops_test_standing"] = _cnt(st2.species[te2])
 
     out["config"] = {"layer": args.layer, "facet": args.facet, "size": args.size,

@@ -115,6 +115,8 @@ def main() -> int:
     ap.add_argument("--geo-axis", action="store_true",
                     help="restrict to the geometric body axis (geometry proposes, appearance "
                          "disposes). Appearance is measurably bad at picking the axis.")
+    ap.add_argument("--mask-workers", type=int, default=16,
+                    help="threads for prefetching the SAM mask PNGs (pure NFS I/O)")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
@@ -132,13 +134,28 @@ def main() -> int:
     cfg = Config(args.layer, args.facet, args.size, args.bins)
     rng = np.random.default_rng(args.seed)
     idx_fit = np.sort(rng.permutation(np.where(~te)[0])[:1500])
+    idx_te = np.where(te)[0]
+
+    # Load every mask ONCE, in parallel, before any GPU work. Each is a 1920x1080 PNG on network
+    # storage; loading them one at a time inside the batch loop stalls for tens of minutes with no
+    # output, which looks exactly like a hang.
+    crops.prefetch(np.concatenate([idx_fit, idx_te]), workers=args.mask_workers)
 
     # ---- per-frame scores on the held-out videos ----
     with DenseExtractor(args.model, args.device) as ex:
-        tmpl = AxisTemplate.fit(ex, crops, idx_fit, cfg, args.batch)
-        print(f"template: {tmpl.n_fitted}\n")
+        acc = None
+        for b in range(0, len(idx_fit), args.batch):
+            items = crops.batch(idx_fit[b: b + args.batch])
+            G = ex.grid(np.stack([it.image for it in items]), cfg)
+            if acc is None:
+                from tools.heading.template import Accumulator
+                acc = Accumulator(cfg)
+            for g, it in zip(G, items):
+                acc.add(g, it)
+            print(f"  fit {min(b+args.batch, len(idx_fit))}/{len(idx_fit)}", end="\r", flush=True)
+        tmpl = acc.build()
+        print(f"\ntemplate: {tmpl.n_fitted}\n")
 
-        idx_te = np.where(te)[0]
         S = np.full((len(idx_te), 4), -np.inf)
         for b in range(0, len(idx_te), args.batch):
             items = crops.batch(idx_te[b: b + args.batch])
@@ -149,8 +166,8 @@ def main() -> int:
                 s = tmpl.score_faces(g, foreground(g, it.instance), it.face_uv,
                                      it.face_ids, it.species)
                 S[b + k] = np.where(np.isnan(s), -np.inf, s)
-            if b % (args.batch * 20) == 0:
-                print(f"  scored {b}/{len(idx_te)}", flush=True)
+            print(f"  scored {min(b+args.batch, len(idx_te))}/{len(idx_te)}", end="\r", flush=True)
+        print()
 
     # ---- group by TRACK, decode in world azimuth ----
     by_track: dict[str, list[int]] = defaultdict(list)

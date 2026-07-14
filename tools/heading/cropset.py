@@ -44,12 +44,21 @@ class Item:
 
 
 class CropSet:
+    """Crops + their SAM instance masks.
+
+    MASKS ARE CACHED AND PREFETCHED, and both matter. Each mask is a 1920x1080 PNG on network
+    storage (~50-200 ms to open), the sweep re-reads the SAME crops on every facet/size pass, and
+    the work is pure I/O. Naively that is ~12,000 blocking NFS reads -- tens of minutes before a
+    single GPU op, and it looks like a hang. Cached + threaded it is a minute, once.
+
+    Cached masks are stored PACKED (1 bit/pixel): 12k crops at 224x224 is ~80 MB instead of 640 MB.
+    """
+
     def __init__(self, path, *, mask_size: int = 224, verify_masks: bool = True):
         self.d = np.load(path, allow_pickle=True)
         self.mask_size = mask_size
         self.verify = verify_masks
-        self._n_mask = 0
-        self._n_try = 0
+        self._cache: dict[int, np.ndarray | None] = {}
 
         from tools.heading.masks import build_index
 
@@ -69,22 +78,50 @@ class CropSet:
 
     @property
     def mask_rate(self) -> float:
-        return self._n_mask / max(self._n_try, 1)
+        got = [v for v in self._cache.values() if v is not None]
+        return len(got) / max(len(self._cache), 1)
 
-    def _mask(self, i: int):
-        if not self.can_mask:
-            return None
+    def _load_mask(self, i: int):
         from tools.heading.masks import load_crop_mask
 
         d = self.d
-        self._n_try += 1
         m = load_crop_mask(
             str(d["video"][i]), str(d["seg_name"][i]), str(d["track"][i]).split("::")[-1],
             str(d["image_name"][i]), d["crop_box"][i], self.mask_size,
             verify_box=d["box2d"][i] if self.verify else None,
         )
-        self._n_mask += int(m is not None)
-        return m
+        return None if m is None else np.packbits(m)
+
+    def prefetch(self, idx, workers: int = 16, label: str = "") -> None:
+        """Load these masks in parallel, once. Pure I/O, so threads scale well over NFS."""
+        if not self.can_mask:
+            return
+        todo = [int(i) for i in idx if int(i) not in self._cache]
+        if not todo:
+            return
+
+        from concurrent.futures import ThreadPoolExecutor
+
+        print(f"  prefetching {len(todo)} SAM masks{' ' + label if label else ''} "
+              f"({workers} threads) ...", flush=True)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            for i, m in zip(todo, pool.map(self._load_mask, todo)):
+                self._cache[i] = m
+        hit = sum(v is not None for v in self._cache.values())
+        print(f"  masks ready: {hit}/{len(self._cache)} "
+              f"({100*hit/max(len(self._cache),1):.0f}% -- the rest fall back to the "
+              f"appearance mask)", flush=True)
+
+    def _mask(self, i: int):
+        if not self.can_mask:
+            return None
+        if i not in self._cache:
+            self._cache[i] = self._load_mask(i)
+        p = self._cache[i]
+        if p is None:
+            return None
+        m = self.mask_size
+        return np.unpackbits(p)[: m * m].reshape(m, m).astype(bool)
 
     def get(self, i: int) -> Item:
         from PIL import Image

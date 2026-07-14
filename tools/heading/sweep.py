@@ -87,6 +87,8 @@ def main() -> int:
     ap.add_argument("--prior", type=float, default=0.05, help="bonus on the geometric axis")
     ap.add_argument("--all-layers", action="store_true",
                     help="every layer, not a 4-point sample (the A40 can afford it)")
+    ap.add_argument("--mask-workers", type=int, default=16,
+                    help="threads for prefetching the SAM mask PNGs (pure NFS I/O -- threads help)")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
@@ -98,7 +100,12 @@ def main() -> int:
     rng = np.random.default_rng(args.seed)
     idx_fit = np.sort(rng.permutation(np.where(~te)[0])[: args.subset])
     idx_te = np.sort(rng.permutation(np.where(te)[0])[: args.subset])
-    print(f"fit on {len(idx_fit)}, score on {len(idx_te)} held-out\n")
+    print(f"fit on {len(idx_fit)}, score on {len(idx_te)} held-out")
+
+    # Load every mask ONCE, in parallel, before any GPU work. Otherwise each of the 8 passes
+    # re-reads the same 1920x1080 PNGs off network storage and the whole run looks hung.
+    crops.prefetch(np.concatenate([idx_fit, idx_te]), workers=args.mask_workers)
+    print()
 
     rows = []
     with DenseExtractor(args.model, args.device) as ex:
@@ -126,6 +133,8 @@ def main() -> int:
                     for l in layers:
                         for g, it in zip(G[l], items):
                             accs[l].add(g, it)
+                    print(f"    [{facet}/{size}] fit {min(b+args.batch, len(idx_fit))}"
+                          f"/{len(idx_fit)}", end="\r", flush=True)
                 tmpls = {l: a.build() for l, a in accs.items()}
 
                 # ---- ONE pass over the held-out set: score EVERY layer at once ----
@@ -138,6 +147,9 @@ def main() -> int:
                             continue
                         for g, it in zip(G[l], items):
                             score_one(tmpls[l], g, it, stats[l], args.prior)
+                    print(f"    [{facet}/{size}] score {min(b+args.batch, len(idx_te))}"
+                          f"/{len(idx_te)}", end="\r", flush=True)
+                print(" " * 50, end="\r")
 
                 for l in layers:
                     if stats[l]:

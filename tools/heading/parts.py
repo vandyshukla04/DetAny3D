@@ -91,9 +91,11 @@ def main() -> int:
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--k", type=int, default=8)
     ap.add_argument("--fit-tokens", type=int, default=300_000)
-    ap.add_argument("--border-reject", type=float, default=0.55,
-                    help="a cluster with more than this fraction of its patches in the outer "
-                         "ring of the grid is BACKGROUND, not a body part")
+    ap.add_argument("--border-reject", type=float, default=0.35,
+                    help="a cluster with more than this fraction of its patches on the rim of "
+                         "the grid is BACKGROUND, not a body part. On a 14x14 grid the rim is "
+                         "27%% of patches, so a uniform cluster sits at 0.27 -- which is why the "
+                         "old default of 0.55 could never fire.")
     ap.add_argument("--device", default="cuda")
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--viz", action="store_true", help="dump a part-segmentation contact sheet")
@@ -111,13 +113,11 @@ def main() -> int:
           f"species={dict(zip(*np.unique(species, return_counts=True)))}")
 
     # ---- split by VIDEO: calibrate the 4 bits on one set, report on the other ----------
-    rng = np.random.default_rng(args.seed)
-    vids = np.unique(video)
-    rng.shuffle(vids)
-    test_v = set(vids[: max(1, len(vids) // 3)].tolist())
-    te = np.array([v in test_v for v in video])
+    # Shared with train_head.py so the two methods are scored on the SAME held-out videos.
+    from tools.heading.split import video_split
+    te, test_v = video_split(species, video, seed=args.seed)
     cal = ~te
-    print(f"calibration {cal.sum()} crops / {len(vids) - len(test_v)} videos   |   "
+    print(f"calibration {cal.sum()} crops / {len(np.unique(video)) - len(test_v)} videos   |   "
           f"HELD-OUT {te.sum()} crops / {len(test_v)} videos")
 
     # ---- one k-means over all patch tokens --------------------------------------------
@@ -135,38 +135,57 @@ def main() -> int:
     B = np.tile(border, (n, 1))                       # (n, gh*gw): is this patch on the rim?
     brate = np.array([float(B[assign == j].mean()) if (assign == j).any() else 1.0
                       for j in range(args.k)])
+    # A cluster spread UNIFORMLY over the grid sits at exactly this border rate. Anything well
+    # above it is hugging the rim (= background); well below it is animal-core. Comparing
+    # against the grid's own baseline is what makes the threshold meaningful -- an absolute
+    # cut-off like 0.55 can never fire on a 14x14 grid, where the rim is only 27% of patches.
+    base = float(border.mean())
     is_bg = brate > args.border_reject
-    print("\ncluster   share   border-rate")
+    print(f"\n  (a uniformly-spread cluster would have border-rate {100*base:.0f}% on this "
+          f"{gh}x{gw} grid)")
+    print("cluster   share   border-rate")
     for j in range(args.k):
-        share = float((assign == j).mean())
-        print(f"  {j}    {100*share:5.1f}%   {100*brate[j]:5.1f}%"
+        print(f"  {j}    {100*float((assign == j).mean()):5.1f}%   {100*brate[j]:5.1f}%"
               f"{'   <- BACKGROUND (rejected)' if is_bg[j] else ''}")
     parts = [j for j in range(args.k) if not is_bg[j]]
     if not parts:
-        print("\nevery cluster looks like background -- the crops or the border threshold are wrong")
+        print("\nevery cluster looks like background -- the crops or --border-reject are wrong")
         return 1
 
     # ---- for every crop, every cluster's centroid -> which of the 4 faces is it nearest? ----
     cent = np.stack([cluster_centroids(assign[i], xy, args.k) for i in range(n)])   # (n, k, 2)
     dist = np.linalg.norm(cent[:, :, None, :] - face_uv[:, None, :, :], axis=-1)    # (n, k, 4)
-    nearest = np.where(np.isnan(dist).all(-1), -1, np.nanargmin(dist, axis=-1))     # (n, k)
-    correct = nearest == y_face[:, None]                                            # (n, k)
+
+    # A cluster can be ABSENT from a crop (no patches assigned) -> its whole row is NaN.
+    # np.where does NOT short-circuit, so calling nanargmin on those rows raises
+    # "All-NaN slice encountered". Fill with +inf and use a plain argmin instead.
+    present = ~np.isnan(dist).all(-1)                                               # (n, k)
+    nearest = np.where(np.isnan(dist), np.inf, dist).argmin(-1)                     # (n, k)
+    correct = (nearest == y_face[:, None]) & present    # absent => counted WRONG, not skipped:
+                                                        # a part that vanishes half the time is
+                                                        # not a usable head detector.
 
     # ---- calibrate: which cluster IS the head? one choice per species (4 bits total) ----
     print(f"\n=== PART -> FRONT FACE   (chance 25%) ===")
-    print(f"{'species':>9s} {'head cluster':>13s} {'calib':>7s} {'HELD-OUT':>9s} {'n':>6s}")
+    print(f"{'species':>9s} {'head':>5s} {'calib':>7s} {'HELD-OUT':>9s} {'present':>8s} "
+          f"{'oracle':>7s} {'n':>6s}")
     rows = []
     for s in sorted(set(species.tolist())):
-        m_cal = cal & (species == s)
-        m_te = te & (species == s)
+        m_cal, m_te = cal & (species == s), te & (species == s)
         if m_cal.sum() < 20 or m_te.sum() < 20:
             print(f"{s:>9s}   too few crops (cal {m_cal.sum()}, test {m_te.sum()})")
             continue
         scores = {j: float(correct[m_cal, j].mean()) for j in parts}
-        head = max(scores, key=scores.get)
-        acc = float(correct[m_te, head].mean())
+        head = max(scores, key=scores.get)                     # SELECTED on calibration only
+        acc = float(correct[m_te, head].mean())                # SCORED on held-out videos
+        # Oracle = the best cluster had we been allowed to peek at the test set. If oracle is
+        # far above the selected one, the calibration does not transfer and the "head cluster"
+        # is not a stable, species-level concept -- which is itself the finding.
+        oracle = max(float(correct[m_te, j].mean()) for j in parts)
+        pres = float(present[m_te, head].mean())
         rows.append((s, head, scores[head], acc, int(m_te.sum())))
-        print(f"{s:>9s} {head:13d} {100*scores[head]:6.1f}% {100*acc:8.1f}% {m_te.sum():6d}")
+        print(f"{s:>9s} {head:5d} {100*scores[head]:6.1f}% {100*acc:8.1f}% {100*pres:7.0f}% "
+              f"{100*oracle:6.1f}% {m_te.sum():6d}")
 
     if rows:
         w = np.array([r[4] for r in rows], dtype=float)

@@ -69,6 +69,13 @@ python -m tools.heading.train_head \
     --features "$FEATS" --save "$OUT/head.pt" --device cuda \
     || die "C (train_head) failed"
 
+# ---- D: SEE the predictions on held-out videos ---------------------------------------
+log "D: rendering predictions on held-out videos"
+python -m tools.heading.visualize \
+    --features "$FEATS" --crops "$CROPS" --head "$OUT/head.pt" \
+    --out "$OUT/vis" --device cuda \
+    || die "D (visualize) failed"
+
 log "DONE."
 echo
 echo "  Compare the two 4-way FRONT-FACE numbers (chance 25%):"

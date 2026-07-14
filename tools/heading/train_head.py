@@ -75,16 +75,16 @@ def main() -> int:
           f"{len(np.unique(vid))} videos")
 
     # --- HOLD OUT WHOLE VIDEOS ---------------------------------------------------------
+    # The split lives in split.py so parts.py scores on the SAME videos -- otherwise the
+    # training-free and supervised numbers are not comparable, and the drift is silent.
     if args.holdout_species:
         te = sp == args.holdout_species
         print(f"holding out species={args.holdout_species}: {te.sum()} test / {(~te).sum()} train")
     else:
-        vids = np.unique(vid)
-        rng = np.random.default_rng(args.seed)
-        rng.shuffle(vids)
-        test_v = set(vids[: max(1, len(vids) // 3)].tolist())
-        te = np.array([v in test_v for v in vid])
-        print(f"held-out {len(test_v)}/{len(vids)} VIDEOS: {te.sum()} test / {(~te).sum()} train")
+        from tools.heading.split import video_split
+        te, test_v = video_split(sp, vid, seed=args.seed)
+        print(f"held-out {len(test_v)}/{len(np.unique(vid))} VIDEOS (stratified by species): "
+              f"{te.sum()} test / {(~te).sum()} train")
     tr = ~te
     if tr.sum() == 0 or te.sum() == 0:
         print("empty split")

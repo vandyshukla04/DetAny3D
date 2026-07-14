@@ -213,10 +213,14 @@ def main() -> int:
     dec = np.array([r[4] for r in rows])
     W = n / n.sum()
 
+    # --geo-axis restricts the hypotheses to the TWO ends of the geometric body axis, so chance is
+    # 50%, not 25%. Printing 25% there flatters the result by a factor of two.
+    chance = 50.0 if args.geo_axis else 25.0
     print(f"\n=== TRACK-LEVEL DECODE  ({len(rows)} held-out tracks) ===")
     print(f"  per-frame, RAW (argmax)      : {100*(raw*W).sum():5.1f}%")
     print(f"  per-frame, VITERBI (world az): {100*(dec*W).sum():5.1f}%   <- the accumulation")
-    print(f"  chance                       :  25.0%")
+    print(f"  chance                       : {chance:5.1f}%"
+          f"   ({'2 candidates: geometry proposes the axis' if args.geo_axis else '4 candidates'})")
 
     print(f"\n{'species':>9s} {'tracks':>7s} {'raw':>7s} {'viterbi':>8s}")
     for s in sorted({r[0] for r in rows}):

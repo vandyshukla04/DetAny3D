@@ -299,6 +299,20 @@ def main() -> int:
             print(f"  it. A large gap means locomotion only works where locomotion already was.")
 
     args.out.mkdir(parents=True, exist_ok=True)
+    def _cnt(a):
+        return {str(k): int(v) for k, v in zip(*np.unique(a, return_counts=True))}
+
+    out["data"] = {
+        "crops_total": _cnt(crops.species),
+        "crops_train_videos": _cnt(crops.species[~te]),
+        "crops_test_walking": _cnt(crops.species[te]),
+        "template_fitted_on": {k: int(v) for k, v in tmpl.n_fitted.items()},
+    }
+    if args.stand_crops:
+        st2 = CropSet(args.stand_crops)
+        te2, _ = video_split(st2.species, st2.video, seed=args.seed)
+        out["data"]["crops_test_standing"] = _cnt(st2.species[te2])
+
     out["config"] = {"layer": args.layer, "facet": args.facet, "size": args.size,
                      "bins": args.bins, "seed": args.seed, "fit_crops": int(len(idx_fit)),
                      "held_out_videos": sorted(map(str, test_v)),

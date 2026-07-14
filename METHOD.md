@@ -143,17 +143,34 @@ h = cos α · r + sin α · s
 α is the animal's orientation **relative to the viewing ray**, which is what a crop determines. It is
 exactly DetAny3D's `alpha` (the allocentric/observation angle).
 
-**Viewpoint tag** (the deliverable). With `left = up × h = cos α · s − sin α · r`, and the camera
-lying in the `−r` direction from the animal:
+**Viewpoint tag — how visibility is computed (the deliverable).**
+The animal's own left side is `left = up × h = cos α · s − sin α · r`, and the camera lies in the
+`−r` direction from the animal. Substituting:
 
 ```
-dot(left, −r) =  sin α      →  sin α > 0 : the LEFT flank faces the camera
-dot(h,    −r) = −cos α      →  cos α < 0 : we see its FACE (else its REAR)
-|sin α|                     →  how broadside;  → 0 means head-on and NO flank is visible
+left · (−r) =  sin α      →   sin α > 0 : we are seeing its LEFT flank
+                              sin α < 0 : we are seeing its RIGHT flank
+   h · (−r) = −cos α      →   cos α < 0 : we are seeing its FACE  (walking toward us)
+                              cos α > 0 : we are seeing its REAR  (walking away)
 ```
+
+| quantity | meaning |
+|---|---|
+| **\|sin α\|** | how much **flank** we see. 1 = fully broadside, 0 = none. |
+| **\|cos α\|** | how much **face or rear** we see. |
+| sign of `sin α` | LEFT or RIGHT |
+| sign of `cos α` | FACE or REAR |
+
+`|sin α|` and `|cos α|` are the two components of one unit vector, so they trade off exactly: an
+animal 0.95 broadside is necessarily 0.31 rear. A head-on animal reads `LEFT 0.08 / FACE 0.99` —
+which is the honest statement that **no flank is visible**, not a failed prediction. Hence the
+figures print the *weights*, not a binary side label: re-ID needs to know **how much** of a flank it
+is looking at, not merely which one. **Flank accuracy is therefore reported only where
+`|sin α| ≥ 0.35`** — where a flank exists to be named at all.
 
 *Verified against the independent construction (`left = up × forward`, `forward · to_camera`) over
-200 random cameras and headings: exact, 200/200.*
+200 random cameras and headings: exact, 200/200. A sign error here would invert every re-ID match
+while looking entirely plausible, because LEFT and RIGHT are equally common.*
 
 **Motion label.** Smooth the world centres (moving average, k=9); take the displacement over a
 window of W = 15 frames; project out `up`; normalise:

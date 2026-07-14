@@ -84,6 +84,73 @@ def main() -> int:
              "are commentary and are kept separate from the measurements.*")
     f.append("")
 
+    # ---- MISSING TRANSFER TEST: say so at the TOP, in bold. ----
+    if not R.get("transfer"):
+        f.append("> ## ⚠️ THE TRANSFER TEST IS MISSING FROM THIS REPORT")
+        f.append("> ")
+        f.append("> `crops_stand.npz` was not present, so **the method was never tested on "
+                 "STANDING animals** — and standing animals are **86% of the dataset**. Everything "
+                 "below is measured on *walking* animals only, which is the population that "
+                 "produced the training labels in the first place.")
+        f.append("> ")
+        f.append("> **This report is incomplete.** Build the stationary set and re-run:")
+        f.append("> ```")
+        f.append("> python -m tools.heading.bridges --out data/heading/bridges.npz")
+        f.append("> python -m tools.heading.extract_crops --labels data/heading/bridges.npz \\")
+        f.append(">        --out data/heading/crops_stand.npz --stride 1")
+        f.append("> bash tools/heading/run_all.sh")
+        f.append("> ```")
+        f.append("")
+
+    # ---- DATA: what WildBox contains, and what we actually used ----
+    ds_p = Path(__file__).parent / "dataset.json"
+    data = R.get("data", {})
+    if ds_p.is_file():
+        DS = json.loads(ds_p.read_text())
+        f.append("## Data")
+        f.append("")
+        f.append("### What WildBox contains")
+        f.append("")
+        f.append("| species | videos | segments | frames | animals tracked | animal images |")
+        f.append("|---|---:|---:|---:|---:|---:|")
+        for sp in sorted(k for k in DS if k != "TOTAL"):
+            d = DS[sp]
+            f.append(f"| {sp} | {d['videos']} | {d['segments']} | {d['frames']:,} | "
+                     f"{d['tracks']} | {d['animal_images']:,} |")
+        t = DS["TOTAL"]
+        f.append(f"| **total** | **{t['videos']}** | **{t['segments']}** | **{t['frames']:,}** | "
+                 f"**{t['tracks']}** | **{t['animal_images']:,}** |")
+        f.append("")
+        f.append(f"An *animal image* is one animal in one frame. There are "
+                 f"**{t['animal_images']/t['frames']:.1f} animals per frame** — the frames contain "
+                 f"herds, which is why an instance mask is necessary rather than a nicety.")
+        f.append("")
+
+    if data:
+        f.append("### What we actually used")
+        f.append("")
+        sps = sorted(set().union(*[set(v) for v in data.values() if isinstance(v, dict)]))
+        rows = [("crops kept (walking, every 2nd frame)", "crops_total"),
+                ("→ from training videos", "crops_train_videos"),
+                ("→ used to build the template", "template_fitted_on"),
+                ("→ **held out, walking: TESTED ON**", "crops_test_walking"),
+                ("→ **held out, standing: TESTED ON**", "crops_test_standing")]
+        f.append("| | " + " | ".join(sps) + " | total |")
+        f.append("|---|" + "---:|" * (len(sps) + 1))
+        for label, key in rows:
+            d = data.get(key)
+            if not d:
+                continue
+            v = [d.get(s, 0) for s in sps]
+            f.append(f"| {label} | " + " | ".join(f"{x:,}" for x in v) + f" | **{sum(v):,}** |")
+        f.append("")
+        f.append("**[interpretation]** The dataset is large; the *free* labels are sparse. A "
+                 "heading label costs nothing only when the animal is **walking** — a walking "
+                 "animal shows you which way it faces. That is ~14% of the animal images. The other "
+                 "86% are standing still and give us nothing for free, which is exactly why the "
+                 "transfer test exists.")
+        f.append("")
+
     # ---- setup ----
     f.append("## Setup")
     f.append("")
@@ -101,6 +168,61 @@ def main() -> int:
              "contains both our sign/axis decision **and the box's own axis error**. The "
              "`locomotion only (oracle)` row makes that floor explicit: it is the error obtained "
              "with a *perfect* sign, and no method built on these boxes can beat it.")
+    f.append("")
+
+    # ---- HOW VISIBILITY IS COMPUTED. This is the deliverable; it gets its own section. ----
+    f.append("## How visibility is computed")
+    f.append("")
+    f.append("The heading is the means. The **viewpoint tag** is the end — *which part of the "
+             "animal is the camera actually looking at?* It follows from **one angle**, with no "
+             "extra model and no extra geometry.")
+    f.append("")
+    f.append("Let `up` be the ground normal and `h` the animal's heading (both in world "
+             "coordinates). Build a frame at the animal from the **viewing ray**:")
+    f.append("")
+    f.append("```")
+    f.append("r = the camera→animal direction, flattened into the ground plane")
+    f.append("s = up × r                       so (r, s, up) is right-handed")
+    f.append("")
+    f.append("α = atan2(h·s, h·r)              the ALLOCENTRIC angle:")
+    f.append("                                 the animal's heading relative to the viewing ray")
+    f.append("h = cos α · r + sin α · s")
+    f.append("```")
+    f.append("")
+    f.append("The animal's own left side is `left = up × h = cos α · s − sin α · r`, and the camera "
+             "lies in the **−r** direction from the animal. Substituting:")
+    f.append("")
+    f.append("```")
+    f.append("left · (−r) =  sin α        →  sin α > 0 : we are seeing its LEFT flank")
+    f.append("                               sin α < 0 : we are seeing its RIGHT flank")
+    f.append("   h · (−r) = −cos α        →  cos α < 0 : we are seeing its FACE  (walking toward us)")
+    f.append("                               cos α > 0 : we are seeing its REAR  (walking away)")
+    f.append("```")
+    f.append("")
+    f.append("So the tag is:")
+    f.append("")
+    f.append("| quantity | meaning |")
+    f.append("|---|---|")
+    f.append("| **\\|sin α\\|** | how much **flank** we see. 1 = fully broadside, 0 = none. |")
+    f.append("| **\\|cos α\\|** | how much **face or rear** we see. |")
+    f.append("| sign of `sin α` | **LEFT** or **RIGHT** |")
+    f.append("| sign of `cos α` | **FACE** or **REAR** |")
+    f.append("")
+    f.append("`|sin α|` and `|cos α|` are the two components of one unit vector, so they trade off "
+             "exactly: an animal 0.95 broadside is necessarily 0.31 rear. A head-on animal reads "
+             "`LEFT 0.08 / FACE 0.99` — which is the honest statement that **no flank is visible**, "
+             "not a failed prediction. This is why the figures print the *weights* and not a binary "
+             "side label: a re-ID system needs to know **how much** of a flank it is looking at, "
+             "not merely which one.")
+    f.append("")
+    f.append("**Flank accuracy is therefore reported only where `|sin α| ≥ 0.35`** — where a flank "
+             "genuinely exists to be named. Elsewhere the animal is end-on and the question is "
+             "undefined.")
+    f.append("")
+    f.append("*Verified against the independent construction (`left = up × forward`, "
+             "`forward · to_camera`) over 200 random cameras and headings: exact, 200/200. A sign "
+             "error here would invert every re-ID match while looking entirely plausible, because "
+             "LEFT and RIGHT are equally common.*")
     f.append("")
 
     # ---- main ----

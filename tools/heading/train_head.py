@@ -77,14 +77,19 @@ def main() -> int:
     # --- HOLD OUT WHOLE VIDEOS ---------------------------------------------------------
     # The split lives in split.py so parts.py scores on the SAME videos -- otherwise the
     # training-free and supervised numbers are not comparable, and the drift is silent.
+    from tools.heading.split import HUMAN_LOCKED_VIDEOS, split_fingerprint, video_split
+
     if args.holdout_species:
         te = sp == args.holdout_species
+        test_v = sorted(set(vid[te].tolist()))
         print(f"holding out species={args.holdout_species}: {te.sum()} test / {(~te).sum()} train")
     else:
-        from tools.heading.split import video_split
         te, test_v = video_split(sp, vid, seed=args.seed)
         print(f"held-out {len(test_v)}/{len(np.unique(vid))} VIDEOS (stratified by species): "
               f"{te.sum()} test / {(~te).sum()} train")
+        locked = [v for v in HUMAN_LOCKED_VIDEOS if v in set(map(str, vid))]
+        if locked:
+            print(f"  ({len(locked)} human-locked video(s) held out permanently: {locked})")
     tr = ~te
     if tr.sum() == 0 or te.sum() == 0:
         print("empty split")
@@ -144,7 +149,12 @@ def main() -> int:
         torch.save({"state_dict": net.state_dict(), "in_dim": int(X.shape[1]),
                     "hidden": args.hidden, "head_version": HEAD_VERSION,
                     "mu": mu.astype(np.float32), "sd": sd.astype(np.float32),
-                    "target": "allocentric_alpha"}, args.save)
+                    "target": "allocentric_alpha",
+                    # WHAT THIS MODEL NEVER SAW. Every evaluator asserts against it before
+                    # reporting a number. Without it, a head trained under one split was scored
+                    # under another and reported 94.3% where the truth was 79.8% -- and nothing
+                    # could catch it, because the checkpoint had no memory of its own split.
+                    "split": split_fingerprint(test_v, seed=args.seed)}, args.save)
         print(f"\nsaved -> {args.save}")
     return 0
 

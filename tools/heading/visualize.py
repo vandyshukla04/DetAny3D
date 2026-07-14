@@ -35,7 +35,7 @@ from pathlib import Path
 
 import numpy as np
 
-from tools.heading.split import video_split
+from tools.heading.split import assert_matches, video_split
 from tools.heading.train_head import face_from_alpha
 
 
@@ -78,9 +78,12 @@ def main() -> int:
     net = build_head(ck["in_dim"], ck["hidden"]).to(args.device).eval()
     net.load_state_dict(ck["state_dict"])
 
-    # The SAME held-out videos train_head.py and parts.py report on.
     te, test_v = video_split(sp, vid, seed=args.seed)
-    print(f"held-out {len(test_v)} videos, {te.sum()} crops -- none seen in training")
+    # HARD FAILURE if this model was trained under a different split. Scoring a model on videos
+    # it trained on reported 94.3% where the truth was 79.8% -- a believably good number that
+    # nobody would have questioned.
+    assert_matches(ck, test_v, seed=args.seed, what=str(args.head))
+    print(f"held-out {len(test_v)} videos, {te.sum()} crops -- none seen in training (split verified)")
 
     with torch.no_grad():
         Z = torch.tensor((X[te] - ck["mu"]) / ck["sd"], device=args.device)

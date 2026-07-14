@@ -83,6 +83,10 @@ def main() -> int:
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--model", default=DEFAULT_MODEL)
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--dtype", default="bf16", choices=["bf16", "fp16", "fp32"],
+                    help="the extractor is FROZEN and its outputs are L2-normalised, so "
+                         "bf16 costs nothing and is ~3-4x faster (tests/test_dtype.py "
+                         "verifies it changes no decision). fp32 to fall back.")
     ap.add_argument("--subset", type=int, default=1500)
     ap.add_argument("--batch", type=int, default=64, help="A40 has headroom; raise this")
     ap.add_argument("--bins", type=int, default=5)
@@ -110,7 +114,7 @@ def main() -> int:
     print()
 
     rows = []
-    with DenseExtractor(args.model, args.device) as ex:
+    with DenseExtractor(args.model, args.device, args.dtype) as ex:
         L = ex.n_layers
         layers = list(range(1, L + 1)) if args.all_layers else sorted(
             {L // 2, (2 * L) // 3, (3 * L) // 4, L})

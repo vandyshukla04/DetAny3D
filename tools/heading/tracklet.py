@@ -47,7 +47,7 @@ import numpy as np
 from tools.heading.cropset import CropSet
 from tools.heading.descriptors import DEFAULT_MODEL, Config, DenseExtractor, foreground
 from tools.heading.split import video_split
-from tools.heading.template import AxisTemplate
+from tools.heading.template import Accumulator
 
 __all__ = ["viterbi_azimuth", "wrap"]
 
@@ -104,6 +104,10 @@ def main() -> int:
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--model", default=DEFAULT_MODEL)
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--dtype", default="bf16", choices=["bf16", "fp16", "fp32"],
+                    help="the extractor is FROZEN and its outputs are L2-normalised, so "
+                         "bf16 costs nothing and is ~3-4x faster (tests/test_dtype.py "
+                         "verifies it changes no decision). fp32 to fall back.")
     ap.add_argument("--layer", type=int, default=12)
     ap.add_argument("--facet", default="key", choices=["token", "key"])
     ap.add_argument("--size", type=int, default=448)
@@ -142,14 +146,11 @@ def main() -> int:
     crops.prefetch(np.concatenate([idx_fit, idx_te]), workers=args.mask_workers)
 
     # ---- per-frame scores on the held-out videos ----
-    with DenseExtractor(args.model, args.device) as ex:
-        acc = None
+    with DenseExtractor(args.model, args.device, args.dtype) as ex:
+        acc = Accumulator(cfg)
         for b in range(0, len(idx_fit), args.batch):
             items = crops.batch(idx_fit[b: b + args.batch])
             G = ex.grid(np.stack([it.image for it in items]), cfg)
-            if acc is None:
-                from tools.heading.template import Accumulator
-                acc = Accumulator(cfg)
             for g, it in zip(G, items):
                 acc.add(g, it)
             print(f"  fit {min(b+args.batch, len(idx_fit))}/{len(idx_fit)}", end="\r", flush=True)

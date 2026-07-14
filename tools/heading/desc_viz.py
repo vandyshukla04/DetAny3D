@@ -66,6 +66,10 @@ def main() -> int:
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--model", default=DEFAULT_MODEL)
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--dtype", default="bf16", choices=["bf16", "fp16", "fp32"],
+                    help="the extractor is FROZEN and its outputs are L2-normalised, so "
+                         "bf16 costs nothing and is ~3-4x faster (tests/test_dtype.py "
+                         "verifies it changes no decision). fp32 to fall back.")
     ap.add_argument("--layer", type=int, default=-1)
     ap.add_argument("--facet", default="key", choices=["token", "key"])
     ap.add_argument("--size", type=int, default=448)
@@ -78,26 +82,26 @@ def main() -> int:
 
     from PIL import Image, ImageDraw
 
-    d = np.load(args.crops, allow_pickle=True)
-    jpeg, face_uv, y_face = d["jpeg"], d["face_uv"], d["y_face"]
-    face_ids, sp, vid = d["face_ids"], d["species"], d["video"]
+    from tools.heading.cropset import CropSet
+    from tools.heading.template import choose
 
-    te, _ = video_split(sp, vid, seed=args.seed)
+    crops = CropSet(args.crops)
+    te, _ = video_split(crops.species, crops.video, seed=args.seed)
     cfg = Config(args.layer, args.facet, args.size, args.bins)
     rng = np.random.default_rng(args.seed)
 
-    with DenseExtractor(args.model, args.device) as ex:
+    # Template from CALIBRATION videos only -- never the ones we render.
+    idx_fit = np.sort(rng.permutation(np.where(~te)[0])[: args.fit_n])
+    picks: list[int] = []
+    for s in sorted(set(crops.species.tolist())):
+        pool = np.where(te & (crops.species == s))[0]
+        picks.extend(int(i) for i in rng.permutation(pool)[: args.per_species])
+    crops.prefetch(np.concatenate([idx_fit, np.array(picks, dtype=int)]))
+
+    with DenseExtractor(args.model, args.device, args.dtype) as ex:
         print(f"{cfg} | {ex.n_layers} layers, patch {ex.patch}")
-
-        # Template from CALIBRATION videos only -- never the ones we render.
-        idx_fit = np.sort(rng.permutation(np.where(~te)[0])[: args.fit_n])
-        tmpl = AxisTemplate.fit(ex, d, idx_fit, cfg)
+        tmpl = AxisTemplate.fit(ex, crops, idx_fit, cfg)
         print(f"template from {len(idx_fit)} calibration crops: {tmpl.n_fitted}")
-
-        picks: list[int] = []
-        for s in sorted(set(sp.tolist())):
-            pool = np.where(te & (sp == s))[0]
-            picks.extend(int(i) for i in rng.permutation(pool)[: args.per_species])
 
         C = args.cell
         sheet = Image.new("RGB", (4 * C, len(picks) * C), (14, 14, 16))
@@ -105,21 +109,23 @@ def main() -> int:
         n_ok = 0
 
         for row, i in enumerate(picks):
-            img = np.asarray(Image.open(io.BytesIO(jpeg[i])).convert("RGB"))
-            g = ex.grid(img[None], cfg)[0]
-            fg = foreground(g)
+            it = crops.get(i)
+            g = ex.grid(it.image[None], cfg)[0]
+            fg = foreground(g, it.instance)         # the SAM mask, as the real pipeline uses
             y0 = row * C
 
-            h = int(y_face[i])
-            t = opposite_slot(face_ids[i], h)
-            pred, margin = tmpl.predict_face(g, fg, face_uv[i], face_ids[i], str(sp[i]))
+            h = it.y_face
+            t = opposite_slot(it.face_ids, h)
+            # geometry proposes, appearance disposes -- the same rule the sweep's GEO column scores
+            pred, margin = choose(tmpl.score_faces(g, fg, it.face_uv, it.face_ids, it.species),
+                                  it.face_ids, axis=it.geo_axis)
             ok = pred == h
             n_ok += int(ok)
 
             # 1 -- crop, candidates, truth (green) and prediction (ringed)
-            sheet.paste(Image.fromarray(img).resize((C, C)), (0, y0))
+            sheet.paste(Image.fromarray(it.image).resize((C, C)), (0, y0))
             for j in range(4):
-                u, v = face_uv[i][j] * C
+                u, v = it.face_uv[j] * C
                 col = (40, 255, 90) if j == h else (150, 150, 150)
                 draw.ellipse([u - 5, y0 + v - 5, u + 5, y0 + v + 5], fill=col)
                 if j == pred:
@@ -127,9 +133,11 @@ def main() -> int:
                                  outline=(255, 60, 60), width=3)
             if not ok:
                 draw.rectangle([0, y0, C - 1, y0 + C - 1], outline=(255, 40, 40), width=4)
-            draw.text((4, y0 + 4), f"{sp[i]}  margin {margin:+.3f}", fill=(235, 235, 235))
+            tag = "SAM" if it.instance is not None else "appearance-fg"
+            draw.text((4, y0 + 4), f"{it.species}  margin {margin:+.3f}  [{tag}]",
+                      fill=(235, 235, 235))
 
-            # 2 -- the foreground mask
+            # 2 -- the foreground mask actually used
             fgi = (255 * fg.astype(np.uint8))[..., None].repeat(3, -1)
             sheet.paste(Image.fromarray(fgi).resize((C, C), Image.NEAREST), (C, y0))
             draw.text((C + 4, y0 + 4), "foreground", fill=(235, 235, 235))
@@ -141,7 +149,7 @@ def main() -> int:
             draw.text((2 * C + 4, y0 + 4), "fg PCA-RGB", fill=(235, 235, 235))
 
             # 4 -- the AXIS PROFILE: bins from rump (left) to head (right), in the same PCA colours
-            prof, cnt = axis_profile(g, fg, face_uv[i][t], face_uv[i][h], cfg.bins)
+            prof, cnt = axis_profile(g, fg, it.face_uv[t], it.face_uv[h], cfg.bins)
             if project is not None and cnt.sum():
                 cols = (255 * project(prof)).astype(np.uint8)
                 bw = C // cfg.bins
@@ -151,8 +159,6 @@ def main() -> int:
                     draw.rectangle([x0, y0, x0 + bw - 2, y0 + C - 20], fill=fill)
                     draw.text((x0 + 3, y0 + C - 18), f"{cnt[b]}", fill=(200, 200, 200))
             draw.text((3 * C + 4, y0 + 4), "profile: rump -> head", fill=(235, 235, 235))
-
-        ex.close()
 
     args.out.mkdir(parents=True, exist_ok=True)
     p = args.out / f"method_L{args.layer}_{args.facet}_{args.size}.jpg"

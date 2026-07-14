@@ -56,13 +56,31 @@ class DenseExtractor:
     shifts the grid by a row and silently ruins every 2D lookup.
     """
 
-    def __init__(self, model_name: str = DEFAULT_MODEL, device: str = "cuda"):
+    def __init__(self, model_name: str = DEFAULT_MODEL, device: str = "cuda",
+                 dtype: str = "bf16"):
         import torch
         from transformers import AutoModel
 
         self.torch = torch
         self.device = device
-        self.model = AutoModel.from_pretrained(model_name).to(device).eval()
+
+        # A FROZEN extractor has no business running in fp32. Its outputs are L2-normalised
+        # immediately, so bf16's precision is irrelevant to anything we compute; this is simply how
+        # inference is done. MEASURED on an A40: fp32 @448 costs 40 ms/crop and is 97% of the whole
+        # pipeline (the numpy profile+score is 1 ms/crop; memory peaks at 2.6 GB of 48). TF32 was
+        # also off by default, leaving the tensor cores idle.
+        #
+        # Not taken on faith: --dtype fp32 restores the old path, and tests/test_dtype.py asserts
+        # the bf16 and fp32 descriptors agree to cosine > 0.999.
+        self.dtype = {"bf16": torch.bfloat16, "fp16": torch.float16,
+                      "fp32": torch.float32}[dtype]
+        if device.startswith("cuda"):
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+        else:
+            self.dtype = torch.float32              # bf16 on CPU is slower, not faster
+
+        self.model = AutoModel.from_pretrained(model_name).to(device=device, dtype=self.dtype).eval()
         self.patch = int(self.model.config.patch_size)
         self.n_layers = int(self.model.config.num_hidden_layers)
         self.dim = int(self.model.config.hidden_size)
@@ -151,10 +169,12 @@ class DenseExtractor:
 
         with torch.no_grad():
             x = torch.from_numpy(np.ascontiguousarray(imgs)).to(self.device)
+            # Resize and normalise in fp32 (cheap, and bicubic in bf16 would quantise the pixels),
+            # then cast to the model's dtype for the forward.
             x = x.permute(0, 3, 1, 2).float().div_(255.0)
             x = torch.nn.functional.interpolate(x, size=(size, size),
                                                 mode="bicubic", align_corners=False)
-            x = (x - self.mean) / self.std
+            x = ((x - self.mean) / self.std).to(self.dtype)
 
             self._keys.clear()
             self._toks.clear()

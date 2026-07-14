@@ -9,7 +9,12 @@
 # quote a figure that was not actually measured.
 set -uo pipefail
 
-cd "${SLURM_SUBMIT_DIR:-$PWD}"
+# Locate the repo from THIS SCRIPT's own path. Never from $SLURM_SUBMIT_DIR: inside an interactive
+# srun that variable points at wherever the allocation was launched from, so the script silently
+# cd'd out of the repo and then reported "no data/heading/crops.npz" -- a true statement about the
+# wrong directory, which is the worst kind of error message.
+cd "$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)" || exit 1
+echo "repo: $PWD"
 
 LAYER=${LAYER:-24}
 FACET=${FACET:-token}
@@ -26,8 +31,17 @@ STAND=$D/crops_stand.npz
 log() { echo -e "\n\033[1m=== $* ===\033[0m"; }
 die() { echo "[FATAL] $*" >&2; exit 1; }
 
-[[ -f "$CROPS" ]] || die "no $CROPS"
-[[ -f "$STAND" ]] || echo "  (no $STAND -- the TRANSFER TEST will be skipped)"
+[[ -f "$CROPS" ]] || die "no $CROPS  (cwd is $PWD -- is the file really there?)"
+
+STAND_ARG=()
+if [[ -f "$STAND" ]]; then
+    STAND_ARG=(--stand-crops "$STAND")
+else
+    # ${STAND:+...} would have passed the flag anyway -- the VARIABLE is set even when the FILE is
+    # missing -- and experiments.py would have died on a path that does not exist.
+    echo "  WARNING: no $STAND -- the TRANSFER TEST (standing animals) will be SKIPPED."
+    echo "           That is the experiment the approach rests on; build it with bridges.py."
+fi
 
 # ---- 1. the mask join, per species. If this is wrong, nothing below can be trusted. ----
 log "1/5  SAM mask join"
@@ -37,7 +51,7 @@ python -m tools.heading.check_masks --crops "$CROPS" --workers 32 \
 # ---- 2. THE experiments: main table, ablation, transfer ----
 log "2/5  experiments (main table + ablation + transfer test)"
 python -m tools.heading.experiments \
-    --crops "$CROPS" ${STAND:+--stand-crops "$STAND"} \
+    --crops "$CROPS" "${STAND_ARG[@]}" \
     --out "$R/exp" --layer "$LAYER" --facet "$FACET" --size "$SIZE" --batch "$BATCH" \
     2>&1 | tee "$R/logs/2_experiments.txt"
 

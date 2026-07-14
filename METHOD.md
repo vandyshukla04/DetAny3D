@@ -72,24 +72,29 @@ So **WildBox substitutes for exactly the one component DetAny3D cannot supply.**
 Mean 172 frames per segment; **3.4 animals per frame** — the herd density that makes instance masks
 necessary rather than optional.
 
-### 3.0 What is actually used, and why it shrinks
+### 3.0 What we actually used — **we do NOT use all 177,973 animal images**
 
-The dataset is large; the **free labels** are sparse. Every cut below is the price of a specific
-commitment, not carelessness:
+| | elephant | giraffe | rhino | zebra | total | |
+|---|---:|---:|---:|---:|---:|---|
+| animal images in WildBox | 42,930 | 3,688 | 45,853 | 85,502 | **177,973** |  |
+| **WALKING** → a free heading label | 7,229 | 1,671 | 10,914 | 5,740 | **25,554** | only a walking animal shows you which way it faces |
+| crops kept (every 2nd frame) | 3,614 | 828 | 5,457 | 2,863 | **12,762** | adjacent frames of a walking animal are the same picture |
+| → from the 40 training videos | 2,892 | 798 | 1,300 | 2,004 | **6,994** |  |
+| → **used to build the template** | 587 | 187 | 285 | 440 | **1,499** | the template is a mean — nothing is trained |
+| → **held out, walking: TESTED ON** | 722 | 30 | 4,157 | 859 | **5,768** | 20 videos the template never saw |
+| | | | | | | |
+| STANDING labels (from bridges) | 2,211 | 107 | 1,741 | 778 | **4,837** | WALK → STAND → WALK, heading provably unchanged |
+| → **held out, standing: TESTED ON** | 561 | 10 | 525 | 308 | **1,404** | the transfer test |
 
-| stage | count | why |
-|---|---:|---|
-| animal instances in WildBox | **177,973** | — |
-| …in tracks long enough for a 15-frame motion window | 161,422 | a short track yields no velocity |
-| …**walking** (> 0.30 body-lengths per window) | 35,093 | **only a walking animal labels itself.** 84% are standing. |
-| …**and** the box axis agrees with the motion (cos > 0.8) | **25,554** | the purity gate — discards instances whose box fit is bad |
-| …after stride-2 sub-sampling | **12,762** | two adjacent frames of a walking animal are the *same* measurement |
-| …**held-out videos only** (all reported results) | **5,768** | 20 of 60 videos, never seen in training |
-| …**held-out STATIONARY** crops (the transfer test) | **1,404** | from `WALK → STAND → WALK` bridges |
+**In words.** WildBox holds **177,973** animal images (one animal in one frame). Only
+**25,554** of them (**14%**) come with a free heading label — the ones where the animal is
+**walking**, because a walking animal shows you which way it faces. The other **86%** are
+standing still and tell us nothing for free.
 
-Per segment: `frame_*.jpg` (1920×1080), `cameras.json`, `tracking_summary.json`, `kitti_labels/`.
-SAM3 instance masks live in a parallel archive (`sam3_masks/masks/obj_<track_id>/frame_%06d.png`,
-1920×1080, binary).
+After sub-sampling (two adjacent frames of a walking animal are the *same* measurement) and
+holding out 20 of the 60 videos, the template is built from **1,499** crops, and every number
+reported is measured on **5,768 walking** and **1,404 standing** crops from videos the
+template never saw.
 
 ### 3.1 Coordinate facts (verified, not assumed)
 

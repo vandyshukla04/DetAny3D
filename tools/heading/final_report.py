@@ -105,15 +105,15 @@ def main() -> int:
     # ---- DATA: what WildBox contains, and what we actually used ----
     ds_p = Path(__file__).parent / "dataset.json"
     data = R.get("data", {})
-    if ds_p.is_file():
-        DS = json.loads(ds_p.read_text())
+    DS = json.loads(ds_p.read_text()) if ds_p.is_file() else {}
+    if DS:
         f.append("## Data")
         f.append("")
         f.append("### What WildBox contains")
         f.append("")
         f.append("| species | videos | segments | frames | animals tracked | animal images |")
         f.append("|---|---:|---:|---:|---:|---:|")
-        for sp in sorted(k for k in DS if k != "TOTAL"):
+        for sp in sorted(k for k in DS if k not in ("TOTAL", "FUNNEL")):
             d = DS[sp]
             f.append(f"| {sp} | {d['videos']} | {d['segments']} | {d['frames']:,} | "
                      f"{d['tracks']} | {d['animal_images']:,} |")
@@ -126,29 +126,64 @@ def main() -> int:
                  f"herds, which is why an instance mask is necessary rather than a nicety.")
         f.append("")
 
-    if data:
-        f.append("### What we actually used")
+    # ---- THE FUNNEL. ONE table. 177,973 -> 5,768, so nobody has to guess. ----
+    FN = DS.get("FUNNEL", {})
+    if FN or data:
+        f.append("### What we actually used — **we do NOT use all 177,973 animal images**")
         f.append("")
-        sps = sorted(set().union(*[set(v) for v in data.values() if isinstance(v, dict)]))
-        rows = [("crops kept (walking, every 2nd frame)", "crops_total"),
-                ("→ from training videos", "crops_train_videos"),
-                ("→ used to build the template", "template_fitted_on"),
-                ("→ **held out, walking: TESTED ON**", "crops_test_walking"),
-                ("→ **held out, standing: TESTED ON**", "crops_test_standing")]
-        f.append("| | " + " | ".join(sps) + " | total |")
-        f.append("|---|" + "---:|" * (len(sps) + 1))
-        for label, key in rows:
-            d = data.get(key)
-            if not d:
+        sps = ["elephant", "giraffe", "rhino", "zebra"]
+        rows = [
+            ("animal images in WildBox", FN.get("animal_images"), ""),
+            ("**WALKING** → a free heading label", FN.get("motion_labels"),
+             "only a walking animal shows you which way it faces"),
+            ("crops kept (every 2nd frame)", data.get("crops_total"),
+             "adjacent frames of a walking animal are the same picture"),
+            ("→ from the 40 training videos", data.get("crops_train_videos"), ""),
+            ("→ **used to build the template**", data.get("template_fitted_on"),
+             "the template is a mean — nothing is trained"),
+            ("→ **held out, walking: TESTED ON**", data.get("crops_test_walking"),
+             "20 videos the template never saw"),
+            ("", None, ""),
+            ("STANDING labels (from bridges)", FN.get("bridge_labels"),
+             "WALK → STAND → WALK, heading provably unchanged"),
+            ("→ **held out, standing: TESTED ON**", data.get("crops_test_standing"),
+             "the transfer test"),
+        ]
+        f.append("| | " + " | ".join(sps) + " | total | |")
+        f.append("|---|" + "---:|" * (len(sps) + 1) + "---|")
+        for label, d, note in rows:
+            if d is None:
+                if label == "":
+                    f.append("| | | | | | | |")
                 continue
             v = [d.get(s, 0) for s in sps]
-            f.append(f"| {label} | " + " | ".join(f"{x:,}" for x in v) + f" | **{sum(v):,}** |")
+            f.append(f"| {label} | " + " | ".join(f"{x:,}" for x in v) +
+                     f" | **{sum(v):,}** | {note} |")
         f.append("")
-        f.append("**[interpretation]** The dataset is large; the *free* labels are sparse. A "
-                 "heading label costs nothing only when the animal is **walking** — a walking "
-                 "animal shows you which way it faces. That is ~14% of the animal images. The other "
-                 "86% are standing still and give us nothing for free, which is exactly why the "
-                 "transfer test exists.")
+
+        ai = sum(FN.get("animal_images", {}).values()) or 0
+        ml = sum(FN.get("motion_labels", {}).values()) or 0
+        tw = sum((data.get("crops_test_walking") or {}).values()) or 0
+        ts = sum((data.get("crops_test_standing") or {}).values()) or 0
+        if ai and ml:
+            f.append(f"**In words.** WildBox holds **{ai:,}** animal images. Only **{ml:,}** of them "
+                     f"(**{100*ml/ai:.0f}%**) come with a free heading label — the ones where the "
+                     f"animal is **walking**, because a walking animal shows you which way it faces. "
+                     f"The other **{100-100*ml/ai:.0f}%** are standing still and tell us nothing for "
+                     f"free.")
+            f.append("")
+            f.append(f"After sub-sampling (two adjacent frames of a walking animal are the *same* "
+                     f"measurement) and holding out 20 of the 60 videos, the template is built from "
+                     f"**{sum((data.get('template_fitted_on') or {}).values()):,}** crops and "
+                     f"**every number in this report is measured on {tw:,} walking crops"
+                     + (f" and {ts:,} standing crops" if ts else "") +
+                     f" from videos the template never saw.**")
+            f.append("")
+
+    if data:
+        f.append("**[interpretation]** The dataset is large; the *free* labels are sparse. That "
+                 "sparsity is the premise of the method, not a limitation of the data — and the "
+                 "86% we cannot label for free is exactly what the transfer test exists to probe.")
         f.append("")
 
     # ---- setup ----

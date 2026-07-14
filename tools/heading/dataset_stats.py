@@ -25,7 +25,11 @@ def main() -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--root", type=Path, default=Path("/mnt/d/3DBOX/papersubdata"))
     ap.add_argument("--out", type=Path, default=Path("tools/heading/dataset.json"))
+    ap.add_argument("--labels", type=Path, default=None, help="labels.npz from autolabel.py")
+    ap.add_argument("--bridges", type=Path, default=None, help="bridges.npz from bridges.py")
     args = ap.parse_args()
+
+    import numpy as np
 
     per = defaultdict(lambda: defaultdict(int))
     vids = defaultdict(set)
@@ -54,12 +58,25 @@ def main() -> int:
             tot[k] += v
     out["TOTAL"] = dict(tot)
 
+    # THE FUNNEL: 177,973 animal images -> the handful we actually use. Recorded here, in ONE
+    # artefact, so the report can show the whole chain in a single table and nobody has to
+    # cross-reference two of them to discover that we did not use all 177,973.
+    def _cnt(a):
+        return {str(k): int(v) for k, v in zip(*np.unique(a, return_counts=True))}
+
+    funnel = {"animal_images": {sp: d["animal_images"] for sp, d in out.items() if sp != "TOTAL"}}
+    if args.labels and args.labels.is_file():
+        funnel["motion_labels"] = _cnt(np.load(args.labels, allow_pickle=True)["species"])
+    if args.bridges and args.bridges.is_file():
+        funnel["bridge_labels"] = _cnt(np.load(args.bridges, allow_pickle=True)["species"])
+    out["FUNNEL"] = funnel
+
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(out, indent=1))
 
     print(f"{'species':>9s} {'videos':>7s} {'segments':>9s} {'frames':>8s} {'tracks':>7s} "
           f"{'animal images':>14s}")
-    for sp in sorted(k for k in out if k != "TOTAL"):
+    for sp in sorted(k for k in out if k not in ("TOTAL", "FUNNEL")):
         d = out[sp]
         print(f"{sp:>9s} {d['videos']:7d} {d['segments']:9d} {d['frames']:8d} {d['tracks']:7d} "
               f"{d['animal_images']:14d}")
@@ -68,6 +85,12 @@ def main() -> int:
           f"{t['animal_images']:14d}")
     print(f"\n  {t['animal_images']/t['frames']:.1f} animals per frame -- the frames contain HERDS, "
           f"which is why an instance mask is necessary rather than a nicety.")
+    fn = out["FUNNEL"]
+    if "motion_labels" in fn:
+        ml = sum(fn["motion_labels"].values())
+        print(f"\n  OF THOSE {t['animal_images']:,} animal images, only {ml:,} "
+              f"({100*ml/t['animal_images']:.0f}%) carry a free heading label -- the ones where the")
+        print(f"  animal is WALKING. The rest are standing still and tell us nothing for free.")
     print(f"\nwrote {args.out}")
     return 0
 

@@ -168,6 +168,13 @@ def main() -> int:
                 ext[k] = float(tr.dims[i][c] * np.linalg.norm(a))
             geo_axis = int(max(ext, key=ext.get))
 
+            # the drone, as seen from the animal: azimuth in the ground basis, and elevation above
+            # the animal's horizontal plane (the aerial-oblique geometry, made explicit)
+            to_cam = seg.cameras[fidx].center - tr.centers[i]
+            h_cam = to_cam - np.dot(to_cam, up) * up
+            cam_az = seg.azimuth_of(h_cam) if np.linalg.norm(h_cam) > 1e-9 else 0.0
+            cam_elev = float(np.arctan2(np.dot(to_cam, up), np.linalg.norm(h_cam) + 1e-12))
+
             buf = io.BytesIO()
             Image.fromarray(crop).resize((args.size, args.size), Image.BICUBIC).save(
                 buf, format="JPEG", quality=args.quality)
@@ -185,6 +192,11 @@ def main() -> int:
                 # camera. World azimuth is the quantity that is actually temporally coherent.
                 "face_az": np.array([seg.azimuth_of(faces[f]) for f in fids], dtype=np.float32),
                 "az": float(seg.azimuth_of(d["heading"][j])),
+                # WHERE THE CAMERA IS, relative to the animal, in the segment's ground basis.
+                # cam_az is recoverable from face_az - face_alpha, but cam_elev is not -- and
+                # without it the world panel of the paper figure would have to invent the drone's
+                # height. Two floats; store them rather than fake them.
+                "cam_az": float(cam_az), "cam_elev": float(cam_elev),
                 "front_face": int(d["front_face"][j]),
                 "alpha": float(seg.alpha_of(tr, i, d["heading"][j])),
                 "body_px": body_px,
@@ -217,6 +229,8 @@ def main() -> int:
         face_alpha=np.stack([r["face_alpha"] for r in rec]),
         face_az=np.stack([r["face_az"] for r in rec]),               # WORLD azimuth per candidate
         az=np.array([r["az"] for r in rec], dtype=np.float32),       # the TRUE world azimuth
+        cam_az=np.array([r["cam_az"] for r in rec], dtype=np.float32),
+        cam_elev=np.array([r["cam_elev"] for r in rec], dtype=np.float32),
         face_ids=np.stack([r["face_ids"] for r in rec]),
         geo_axis=np.array([r["geo_axis"] for r in rec], dtype=np.int8),
         species=np.array([r["species"] for r in rec]),

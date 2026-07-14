@@ -169,16 +169,20 @@ def evaluate(crops, idx, S, d, *, tag):
     bands = [(0.00, 0.35, "head-on / tail-on: NO flank exists, and the axis barely projects"),
              (0.35, 0.70, "oblique: a flank is visible"),
              (0.70, 1.01, "broadside: the flank is fully visible -- what re-ID needs")]
+    band_rows = []
     for lo, hi, note in bands:
         q = m & (np.abs(np.sin(a_t)) >= lo) & (np.abs(np.sin(a_t)) < hi)
         if not q.any():
             continue
         fa = float((fl_p == fl_t)[q].mean())
-        print(f"  {lo:5.2f}-{hi:<5.2f} {q.sum():6d} {100*(p_full == y)[q].mean():6.1f}% "
-              f"{100*fa:6.1f}%   {note}")
+        sg = float((p_full == y)[q].mean())
+        band_rows.append({"lo": lo, "hi": hi, "n": int(q.sum()), "sign": sg, "flank": fa,
+                          "note": note})
+        print(f"  {lo:5.2f}-{hi:<5.2f} {q.sum():6d} {100*sg:6.1f}% {100*fa:6.1f}%   {note}")
 
     # per-species, on the full method
     sp = d["species"][idx]
+    per_species = []
     print(f"\n  per-species (FULL METHOD):")
     for s in sorted(set(sp.tolist())):
         q = m & (sp == s)
@@ -187,9 +191,11 @@ def evaluate(crops, idx, S, d, *, tag):
         e = np.degrees(np.abs(wrap(faz[np.arange(n), np.maximum(p_full, 0)][q] - az_true[q])))
         fv = q & vis
         fa = float((fl_p == fl_t)[fv].mean()) if fv.any() else float("nan")
+        per_species.append({"species": s, "n": int(q.sum()), "median_err": float(np.median(e)),
+                            "sign": float((p_full == y)[q].mean()), "flank_vis": fa})
         print(f"    {s:>9s} n={q.sum():5d}  med err {np.median(e):5.1f}d  "
               f"sign {100*(p_full == y)[q].mean():5.1f}%  flank* {100*fa:5.1f}%")
-    return rows, p_full, m
+    return {"rows": rows, "bands": band_rows, "per_species": per_species}, p_full, m
 
 
 def main() -> int:
@@ -241,19 +247,18 @@ def main() -> int:
         # ---- THE COMPACT ABLATION: at most the findings that explain WHY it works ----
         print("\n\n=== ABLATION ===")
         abl = []
-        base = out["main"][3]                                   # the FULL METHOD row
-        abl.append(dict(base, setting="full method"))
+        abl.append(dict(out["main"]["rows"][3], setting="full method"))
 
         print("  (a) UNCENTRED profile (the original scoring) ...")
         S_unc = score_all(ex, crops, idx_te, tmpl, args.batch, centred=False)
         r, _, _ = evaluate(crops, idx_te, S_unc, d, tag="ABLATION: uncentred")
-        abl.append(dict(r[3], setting="  - centring"))
+        abl.append(dict(r["rows"][3], setting="  - centring"))
 
         if crops.can_mask:
             print("  (b) NO instance mask (crop-box foreground only) ...")
             S_nom = score_all(ex, crops, idx_te, tmpl, args.batch, masks=False)
             r, _, _ = evaluate(crops, idx_te, S_nom, d, tag="ABLATION: no SAM mask")
-            abl.append(dict(r[3], setting="  - SAM instance mask"))
+            abl.append(dict(r["rows"][3], setting="  - SAM instance mask"))
 
         # (c) appearance chooses the axis too -- no geometric prior
         n = len(idx_te)
@@ -281,8 +286,8 @@ def main() -> int:
             S_s = score_all(ex, st, idx_s, tmpl, args.batch)
             out["transfer"], _, _ = evaluate(st, idx_s, S_s, sd, tag="STATIONARY (the transfer test)")
 
-            w = out["main"][3]
-            s_ = out["transfer"][3]
+            w = out["main"]["rows"][3]
+            s_ = out["transfer"]["rows"][3]
             print(f"\n  WALKING   sign {100*w['sign']:.1f}%   median err {w['median_err']:.1f} deg")
             print(f"  STANDING  sign {100*s_['sign']:.1f}%   median err {s_['median_err']:.1f} deg")
             print(f"  --------------------------------------------------------------")
@@ -294,6 +299,10 @@ def main() -> int:
             print(f"  it. A large gap means locomotion only works where locomotion already was.")
 
     args.out.mkdir(parents=True, exist_ok=True)
+    out["config"] = {"layer": args.layer, "facet": args.facet, "size": args.size,
+                     "bins": args.bins, "seed": args.seed, "fit_crops": int(len(idx_fit)),
+                     "held_out_videos": sorted(map(str, test_v)),
+                     "sam_masks": bool(crops.can_mask)}
     (args.out / "results.json").write_text(json.dumps(out, indent=1))
     print(f"\nwrote {args.out}/results.json")
     return 0

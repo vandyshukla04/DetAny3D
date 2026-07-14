@@ -74,34 +74,13 @@ class AxisTemplate:
     @classmethod
     def fit(cls, ex: DenseExtractor, crops: "CropSet", idx, cfg: Config,
             batch: int = 32) -> "AxisTemplate":
-        acc: dict[str, np.ndarray] = {}
-        wts: dict[str, np.ndarray] = {}
-        n: dict[str, int] = {}
-
+        acc = Accumulator(cfg)
         for b in range(0, len(idx), batch):
             items = crops.batch(idx[b: b + batch])
             G = ex.grid(np.stack([it.image for it in items]), cfg)
-
             for g, it in zip(G, items):
-                fg = foreground(g, it.instance)            # SAM mask when we have one
-                t = opposite_slot(it.face_ids, it.y_face)  # y_face = the TRUE head end, from motion
-                prof, cnt = axis_profile(g, fg, it.face_uv[t], it.face_uv[it.y_face], cfg.bins)
-                if not cnt.sum():
-                    continue
-                if it.species not in acc:
-                    acc[it.species] = np.zeros_like(prof, dtype=np.float64)
-                    wts[it.species] = np.zeros(cfg.bins, dtype=np.float64)
-                    n[it.species] = 0
-                acc[it.species] += prof * cnt[:, None]     # weight by the evidence in each bin
-                wts[it.species] += cnt
-                n[it.species] += 1
-
-        templates = {}
-        for sp, a in acc.items():
-            m = a / np.maximum(wts[sp], 1.0)[:, None]
-            nrm = np.linalg.norm(m, axis=1, keepdims=True)
-            templates[sp] = (m / np.maximum(nrm, 1e-9)).astype(np.float32)
-        return cls(cfg=cfg, templates=templates, n_fitted=n)
+                acc.add(g, it)
+        return acc.build()
 
     # ---- scoring ----
     def score_faces(self, g: np.ndarray, fg: np.ndarray, face_uv: np.ndarray,
@@ -163,6 +142,44 @@ class AxisTemplate:
         best = int(order[0])
         runner = s[order[1]] if np.isfinite(s[order[1]]) else s[best]
         return best, float(s[best] - runner)
+
+
+class Accumulator:
+    """Builds one species-keyed AxisTemplate incrementally, from crops whose head end is known.
+
+    Exposed (rather than hidden inside `fit`) so the sweep can fit templates for EVERY LAYER from a
+    single forward pass -- `output_hidden_states` already returns all of them, and re-running the
+    ViT once per layer was making the sweep 24x slower than it needed to be.
+    """
+
+    def __init__(self, cfg: Config):
+        self.cfg = cfg
+        self.acc: dict[str, np.ndarray] = {}
+        self.wts: dict[str, np.ndarray] = {}
+        self.n: dict[str, int] = {}
+
+    def add(self, g: np.ndarray, it) -> None:
+        fg = foreground(g, it.instance)                    # the SAM mask when we have one
+        t = opposite_slot(it.face_ids, it.y_face)          # y_face = TRUE head end, from motion
+        prof, cnt = axis_profile(g, fg, it.face_uv[t], it.face_uv[it.y_face], self.cfg.bins)
+        if not cnt.sum():
+            return
+        sp = it.species
+        if sp not in self.acc:
+            self.acc[sp] = np.zeros_like(prof, dtype=np.float64)
+            self.wts[sp] = np.zeros(self.cfg.bins, dtype=np.float64)
+            self.n[sp] = 0
+        self.acc[sp] += prof * cnt[:, None]                # weight by the evidence in each bin
+        self.wts[sp] += cnt
+        self.n[sp] += 1
+
+    def build(self) -> "AxisTemplate":
+        templates = {}
+        for sp, a in self.acc.items():
+            m = a / np.maximum(self.wts[sp], 1.0)[:, None]
+            nrm = np.linalg.norm(m, axis=1, keepdims=True)
+            templates[sp] = (m / np.maximum(nrm, 1e-9)).astype(np.float32)
+        return AxisTemplate(cfg=self.cfg, templates=templates, n_fitted=dict(self.n))
 
 
 def _centre(P: np.ndarray) -> np.ndarray:

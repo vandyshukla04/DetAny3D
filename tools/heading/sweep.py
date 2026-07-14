@@ -32,44 +32,32 @@ import numpy as np
 from tools.heading.cropset import CropSet
 from tools.heading.descriptors import DEFAULT_MODEL, Config, DenseExtractor, foreground
 from tools.heading.split import video_split
-from tools.heading.template import AxisTemplate, opposite_slot
+from tools.heading.template import Accumulator, AxisTemplate, opposite_slot
 
 MODES = ("2way", "app4", "geo", "prior")
 
 
-def evaluate(ex: DenseExtractor, crops: CropSet, idx, tmpl: AxisTemplate,
-             batch: int = 32, prior: float = 0.05):
-    """-> {species: {mode: (correct, n)}}."""
-    stat: dict[str, dict[str, np.ndarray]] = {}
+def score_one(tmpl: AxisTemplate, g, it, stat, prior: float) -> None:
+    """Score one crop under one template, into `stat` (all four modes)."""
+    if it.species not in tmpl.templates:
+        return
+    fg = foreground(g, it.instance)
+    s = tmpl.score_faces(g, fg, it.face_uv, it.face_ids, it.species)
+    if np.isnan(s).all():
+        return
 
-    for b in range(0, len(idx), batch):
-        items = crops.batch(idx[b: b + batch])
-        G = ex.grid(np.stack([it.image for it in items]), tmpl.cfg)
+    h, t = it.y_face, opposite_slot(it.face_ids, it.y_face)
+    sv = np.where(np.isnan(s), -np.inf, s)
 
-        for g, it in zip(G, items):
-            if it.species not in tmpl.templates:
-                continue
-            fg = foreground(g, it.instance)
-            s = tmpl.score_faces(g, fg, it.face_uv, it.face_ids, it.species)
-            if np.isnan(s).all():
-                continue
-
-            h, t = it.y_face, opposite_slot(it.face_ids, it.y_face)
-            sv = np.where(np.isnan(s), -np.inf, s)
-
-            r = stat.setdefault(it.species, {m: np.zeros(2) for m in MODES})
-            # the appearance cue, with the axis question REMOVED
-            r["2way"] += (int(sv[h] >= sv[t]), 1)
-            # appearance free to pick the axis too (this is what collapsed to 39%)
-            r["app4"] += (int(np.argmax(sv) == h), 1)
-            if it.geo_axis >= 0:
-                p_geo, _ = tmpl.predict_face(g, fg, it.face_uv, it.face_ids, it.species,
-                                             axis=it.geo_axis)
-                p_pri, _ = tmpl.predict_face(g, fg, it.face_uv, it.face_ids, it.species,
-                                             axis=it.geo_axis, axis_prior=prior)
-                r["geo"] += (int(p_geo == h), 1)
-                r["prior"] += (int(p_pri == h), 1)
-    return stat
+    r = stat.setdefault(it.species, {m: np.zeros(2) for m in MODES})
+    r["2way"] += (int(sv[h] >= sv[t]), 1)            # appearance cue, axis question REMOVED
+    r["app4"] += (int(np.argmax(sv) == h), 1)        # appearance also picks the axis (the 39%)
+    if it.geo_axis >= 0:
+        p_geo, _ = tmpl.predict_face(g, fg, it.face_uv, it.face_ids, it.species, axis=it.geo_axis)
+        p_pri, _ = tmpl.predict_face(g, fg, it.face_uv, it.face_ids, it.species,
+                                     axis=it.geo_axis, axis_prior=prior)
+        r["geo"] += (int(p_geo == h), 1)
+        r["prior"] += (int(p_pri == h), 1)
 
 
 def _row(label, stat):
@@ -105,7 +93,7 @@ def main() -> int:
     crops = CropSet(args.crops)
     te, test_v = video_split(crops.species, crops.video, seed=args.seed)
     print(f"{len(crops)} crops | held out {len(test_v)} videos ({te.sum()} crops) | "
-          f"instance masks: {'YES' if crops.has_masks else 'NO -- zebra will stay at chance'}")
+          f"SAM masks: {'available' if crops.can_mask else 'NOT FOUND -- zebra stays at chance'}")
 
     rng = np.random.default_rng(args.seed)
     idx_fit = np.sort(rng.permutation(np.where(~te)[0])[: args.subset])
@@ -119,19 +107,41 @@ def main() -> int:
             {L // 2, (2 * L) // 3, (3 * L) // 4, L})
         facets = ("key", "token")
         sizes = (448, 224)
-        print(f"{ex.n_layers} layers, {ex.dim}-d, patch {ex.patch} | "
-              f"{len(layers)*len(facets)*len(sizes)} configs\n")
+        print(f"{ex.n_layers} layers, {ex.dim}-d, patch {ex.patch}")
+        print(f"{len(layers)*len(facets)*len(sizes)} configs, but only "
+              f"{len(facets)*len(sizes)*2} model passes: `output_hidden_states` already returns "
+              f"EVERY layer from one forward, so a layer sweep is free.\n")
 
         print(f"{'config':<20s} {'2WAY':>6s} {'APP4':>6s} {'GEO':>6s} {'PRIOR':>6s}   "
               f"per-species (2way/prior)")
         print(f"{'chance':<20s} {50.0:6.1f} {25.0:6.1f} {50.0:6.1f} {25.0:6.1f}")
-        for cfg in (Config(l, f, s, args.bins) for l in layers for f in facets for s in sizes):
-            tmpl = AxisTemplate.fit(ex, crops, idx_fit, cfg, args.batch)
-            if not tmpl.templates:
-                continue
-            stat = evaluate(ex, crops, idx_te, tmpl, args.batch, args.prior)
-            if stat:
-                rows.append((str(cfg), _row(str(cfg), stat)))
+
+        for facet in facets:
+            for size in sizes:
+                # ---- ONE pass over the fit set: templates for EVERY layer at once ----
+                accs = {l: Accumulator(Config(l, facet, size, args.bins)) for l in layers}
+                for b in range(0, len(idx_fit), args.batch):
+                    items = crops.batch(idx_fit[b: b + args.batch])
+                    G = ex.grids(np.stack([it.image for it in items]), facet, size, layers)
+                    for l in layers:
+                        for g, it in zip(G[l], items):
+                            accs[l].add(g, it)
+                tmpls = {l: a.build() for l, a in accs.items()}
+
+                # ---- ONE pass over the held-out set: score EVERY layer at once ----
+                stats = {l: {} for l in layers}
+                for b in range(0, len(idx_te), args.batch):
+                    items = crops.batch(idx_te[b: b + args.batch])
+                    G = ex.grids(np.stack([it.image for it in items]), facet, size, layers)
+                    for l in layers:
+                        if not tmpls[l].templates:
+                            continue
+                        for g, it in zip(G[l], items):
+                            score_one(tmpls[l], g, it, stats[l], args.prior)
+
+                for l in layers:
+                    if stats[l]:
+                        rows.append((str(tmpls[l].cfg), _row(str(tmpls[l].cfg), stats[l])))
 
     if not rows:
         print("nothing scored")

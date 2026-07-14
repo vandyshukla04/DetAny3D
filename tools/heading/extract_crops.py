@@ -92,10 +92,6 @@ def main() -> int:
     ap.add_argument("--min-body-px", type=float, default=24.0,
                     help="drop animals smaller than this on screen: DINOv3 gives a 14x14 patch "
                          "grid over the crop, so a tiny animal has no parts left to find")
-    ap.add_argument("--masks", type=Path, default=None,
-                    help="masks.npz from pack_masks.py (run on the CLUSTER -- the SAM3 masks live "
-                         "there). Without it, herd crops cannot separate the target from an "
-                         "overlapping neighbour, and zebra sits at chance.")
     args = ap.parse_args()
 
     from PIL import Image
@@ -103,18 +99,6 @@ def main() -> int:
     from tools.heading.conventions import FACE_AXIS
 
     d = np.load(args.labels, allow_pickle=True)
-
-    masks: dict[str, np.ndarray] = {}
-    m_size = 0
-    if args.masks:
-        M = np.load(args.masks, allow_pickle=True)
-        m_size = int(M["size"][0])
-        if abs(float(M["pad"][0]) - args.pad) > 1e-6:
-            raise SystemExit(f"masks.npz was packed with pad={float(M['pad'][0])} but this run "
-                             f"uses pad={args.pad}. The crop boxes would differ and every mask "
-                             f"would be MISALIGNED with its crop -- worse than no mask at all.")
-        masks = {str(k): m for k, m in zip(M["key"], M["mask"])}
-        print(f"loaded {len(masks)} instance masks ({m_size}x{m_size})")
     n_all = len(d["seg"])
     sel = np.arange(0, n_all, max(1, args.stride))
     print(f"{n_all} labels -> {len(sel)} after stride {args.stride}")
@@ -182,9 +166,6 @@ def main() -> int:
                 ext[k] = float(tr.dims[i][c] * np.linalg.norm(a))
             geo_axis = int(max(ext, key=ext.get))
 
-            key = f"{seg.video}/{seg.name}::{tr.tid}::{fidx}"
-            mk = masks.get(key)
-
             buf = io.BytesIO()
             Image.fromarray(crop).resize((args.size, args.size), Image.BICUBIC).save(
                 buf, format="JPEG", quality=args.quality)
@@ -196,11 +177,23 @@ def main() -> int:
                 "face_uv": uv.astype(np.float32),                          # (4, 2), crop coords
                 "face_alpha": np.array([seg.alpha_of(tr, i, faces[f]) for f in fids],
                                        dtype=np.float32),
+                # WORLD azimuth of each candidate, in the segment's fixed ground basis. This is
+                # what the tracklet decoder smooths over: alpha is view-relative, so a STANDING
+                # animal's alpha drifts as the drone moves, and smoothing it would be smoothing the
+                # camera. World azimuth is the quantity that is actually temporally coherent.
+                "face_az": np.array([seg.azimuth_of(faces[f]) for f in fids], dtype=np.float32),
+                "az": float(seg.azimuth_of(d["heading"][j])),
                 "front_face": int(d["front_face"][j]),
                 "alpha": float(seg.alpha_of(tr, i, d["heading"][j])),
                 "body_px": body_px,
                 "geo_axis": geo_axis,
-                "mask": mk,
+                # The EXACT square this crop was cut from, in full-res pixels, plus the frame it
+                # came from. The cluster reads these to cut the SAM instance mask identically --
+                # nothing is recomputed there, so the mask cannot drift out of alignment with the
+                # pixels the network sees.
+                "crop_box": np.array([ox, oy, side], dtype=np.float32),
+                "box2d": box.astype(np.float32),          # for the mask->track join assert
+                "image_name": seg.cameras[fidx].image_name,
             })
         if si % 25 == 0:
             print(f"  {si}/{len(by_seg)} segments, {len(rec)} crops", flush=True)
@@ -214,14 +207,14 @@ def main() -> int:
                       dtype=np.int8)
     alpha = np.array([r["alpha"] for r in rec], dtype=np.float32)
 
-    n_mask = sum(r["mask"] is not None for r in rec)
-    blank = np.zeros(len(rec[0]["mask"]) if n_mask else 1, dtype=np.uint8)
     out = dict(
         jpeg=np.array(jpegs, dtype=object),
         y_face=y_face,                                             # 4-way target (chance 25%)
         Y=np.stack([np.cos(alpha), np.sin(alpha)], axis=1).astype(np.float32),   # allocentric
         face_uv=np.stack([r["face_uv"] for r in rec]),
         face_alpha=np.stack([r["face_alpha"] for r in rec]),
+        face_az=np.stack([r["face_az"] for r in rec]),               # WORLD azimuth per candidate
+        az=np.array([r["az"] for r in rec], dtype=np.float32),       # the TRUE world azimuth
         face_ids=np.stack([r["face_ids"] for r in rec]),
         geo_axis=np.array([r["geo_axis"] for r in rec], dtype=np.int8),
         species=np.array([r["species"] for r in rec]),
@@ -230,14 +223,11 @@ def main() -> int:
         track=np.array([r["track"] for r in rec]),
         frame=np.array([r["frame"] for r in rec], dtype=np.int32),
         body_px=np.array([r["body_px"] for r in rec], dtype=np.float32),
+        crop_box=np.stack([r["crop_box"] for r in rec]),          # (ox, oy, side), full-res px
+        box2d=np.stack([r["box2d"] for r in rec]),                # the animal's own 2D box
+        image_name=np.array([r["image_name"] for r in rec]),      # joins to obj_<tid>/<stem>.png
+        seg_name=np.array([r["seg"].split("/")[-1] for r in rec]),
     )
-    if n_mask:
-        # has_mask is stored explicitly: an all-zero packed mask is indistinguishable from "no
-        # mask", and silently treating a missing mask as an empty foreground would zero out the
-        # animal instead of falling back to the appearance mask.
-        out["mask"] = np.stack([r["mask"] if r["mask"] is not None else blank for r in rec])
-        out["has_mask"] = np.array([r["mask"] is not None for r in rec])
-        out["mask_size"] = np.array([m_size])
 
     args.out.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(args.out, **out)
@@ -245,9 +235,6 @@ def main() -> int:
     mb = args.out.stat().st_size / 1e6
     print(f"\nwrote {len(rec)} crops -> {args.out}  ({mb:.0f} MB)")
     print(f"  dropped: {n_small} too small (<{args.min_body_px:.0f}px), {n_bad} unusable")
-    if args.masks:
-        print(f"  instance masks: {n_mask}/{len(rec)} ({100*n_mask/len(rec):.0f}%)"
-              f"{'  <- the rest fall back to the appearance mask' if n_mask < len(rec) else ''}")
     bp = np.array([r["body_px"] for r in rec])
     print(f"  on-screen size (px): median {np.median(bp):.0f}  p10 {np.percentile(bp, 10):.0f}  "
           f"p90 {np.percentile(bp, 90):.0f}")

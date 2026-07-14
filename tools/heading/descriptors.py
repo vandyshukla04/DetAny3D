@@ -113,6 +113,40 @@ class DenseExtractor:
                 "could not hook any key projection. Fix the pattern rather than falling back to "
                 f"token features -- that would fake the token-vs-key comparison. Saw: {seen}")
 
+    def grids(self, imgs: np.ndarray, facet: str, size: int,
+              layers: "list[int]") -> dict[int, np.ndarray]:
+        """ONE forward pass -> descriptor grids for MANY layers.
+
+        `output_hidden_states=True` already returns every block's output, and the key hooks capture
+        every block's keys -- from a SINGLE forward. Sweeping layers by calling `grid()` once per
+        layer re-runs the entire ViT 24 times for data it already had, which is what made the first
+        sweep take hours instead of minutes.
+        """
+        torch = self.torch
+        with torch.no_grad():
+            x = torch.from_numpy(np.ascontiguousarray(imgs)).to(self.device)
+            x = x.permute(0, 3, 1, 2).float().div_(255.0)
+            x = torch.nn.functional.interpolate(x, size=(size, size),
+                                                mode="bicubic", align_corners=False)
+            x = (x - self.mean) / self.std
+
+            self._keys.clear()
+            out = self.model(pixel_values=x, output_hidden_states=True)
+
+            gh = gw = size // self.patch
+            n = gh * gw
+            res: dict[int, np.ndarray] = {}
+            for li in layers:
+                if facet == "key":
+                    h = self._keys[li - 1]                      # hook index is 0-based
+                    if h.dim() == 4:                            # (B, heads, T, dh) -> (B, T, D)
+                        h = h.permute(0, 2, 1, 3).reshape(h.shape[0], h.shape[2], -1)
+                else:
+                    h = self._final_norm(out.hidden_states[li])
+                h = torch.nn.functional.normalize(h[:, -n:].float(), dim=-1)
+                res[li] = h.reshape(-1, gh, gw, h.shape[-1]).cpu().numpy()
+            return res
+
     def grid(self, imgs: np.ndarray, cfg: Config) -> np.ndarray:
         """(B, H, W, 3) uint8 -> (B, gh, gw, D) float32, L2-normalised.
 

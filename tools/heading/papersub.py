@@ -165,6 +165,40 @@ class Segment:
         projected 3D hull, which inherits the box fit's slop -- rescaled by `self.scale`."""
         return np.asarray(track.bbox_2d[i], dtype=np.float64) * self.scale
 
+    # ---- the WORLD ground frame: azimuths comparable across every frame of the segment ----
+    @cached_property
+    def ground_basis(self) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """A deterministic (e1, e2, up) orthonormal frame for the ground plane of this segment.
+
+        An azimuth measured in this basis means the same thing in EVERY frame of the segment --
+        which is precisely what makes world-space temporal smoothing possible. The allocentric
+        angle cannot do this: it is relative to the viewing ray, so a *stationary* animal's alpha
+        changes as the drone moves. Smoothing alpha would be smoothing the drone's motion, which is
+        exactly why the earlier image-space tracker made things WORSE (96.8% -> 79.0%).
+
+        `up_unsigned` is signed canonically here (largest component positive) rather than toward the
+        camera: a per-instance sign would flip `e2 = up x e1` and therefore flip the azimuth's sense
+        halfway through a track.
+        """
+        up = np.asarray(self.up_unsigned, dtype=np.float64).copy()
+        if up[int(np.argmax(np.abs(up)))] < 0:
+            up = -up
+        a = np.array([1.0, 0.0, 0.0]) if abs(up[0]) < 0.9 else np.array([0.0, 1.0, 0.0])
+        e1 = a - np.dot(a, up) * up
+        e1 /= np.linalg.norm(e1)
+        return e1, np.cross(up, e1), up
+
+    def azimuth_of(self, direction: np.ndarray) -> float:
+        """A WORLD direction -> its azimuth in the segment's ground basis. Comparable across frames."""
+        e1, e2, up = self.ground_basis
+        d = np.asarray(direction, dtype=np.float64)
+        d = d - np.dot(d, up) * up
+        n = float(np.linalg.norm(d))
+        if n < 1e-9:
+            raise ValueError("direction is vertical; it has no azimuth")
+        d = d / n
+        return float(np.arctan2(np.dot(d, e2), np.dot(d, e1)))
+
     # ---- the allocentric (view-relative) frame ----------------------------------------
     def allocentric_basis(self, track: Track, i: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
         """(r, s, up) in WORLD coords, where `r` is the horizontalised camera->animal ray

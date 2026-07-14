@@ -22,8 +22,11 @@ SIZE=${SIZE:-224}
 BATCH=${BATCH:-96}
 
 D=data/heading
-R=$D/REPORT
+# Where everything is written. Override to keep old runs side by side:
+#     OUT=data/heading/REPORT_v2 bash tools/heading/run_all.sh
+R=${OUT:-$D/REPORT}
 mkdir -p "$R"/{logs,fig,camfig,exp,desc}
+echo "output: $R"
 
 CROPS=$D/crops.npz
 STAND=$D/crops_stand.npz

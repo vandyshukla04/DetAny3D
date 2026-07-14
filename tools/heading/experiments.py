@@ -158,6 +158,25 @@ def evaluate(crops, idx, S, d, *, tag):
 
     show(rows, f"MAIN COMPONENT TABLE -- {tag}")
 
+    # ---- WHERE DO THE SIGN ERRORS LIVE?  The decisive diagnostic. ----
+    # Sign accuracy and flank accuracy cannot both be believed unless we know where the failures
+    # sit. When an animal points at the camera its body axis has almost NO EXTENT IN THE IMAGE, so
+    # the profile is degenerate and there is no evidence to read -- the head/tail choice is a coin
+    # flip. Those are exactly the frames where no flank is visible and the tag is undefined anyway.
+    # If the errors concentrate there, "it degrades on standing animals" is the wrong description.
+    print(f"\n  sign accuracy vs how BROADSIDE the animal is (|sin alpha|, from the TRUE heading):")
+    print(f"  {'|sin a|':>12s} {'n':>6s} {'sign':>7s} {'flank':>7s}   interpretation")
+    bands = [(0.00, 0.35, "head-on / tail-on: NO flank exists, and the axis barely projects"),
+             (0.35, 0.70, "oblique: a flank is visible"),
+             (0.70, 1.01, "broadside: the flank is fully visible -- what re-ID needs")]
+    for lo, hi, note in bands:
+        q = m & (np.abs(np.sin(a_t)) >= lo) & (np.abs(np.sin(a_t)) < hi)
+        if not q.any():
+            continue
+        fa = float((fl_p == fl_t)[q].mean())
+        print(f"  {lo:5.2f}-{hi:<5.2f} {q.sum():6d} {100*(p_full == y)[q].mean():6.1f}% "
+              f"{100*fa:6.1f}%   {note}")
+
     # per-species, on the full method
     sp = d["species"][idx]
     print(f"\n  per-species (FULL METHOD):")

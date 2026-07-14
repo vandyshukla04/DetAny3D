@@ -168,6 +168,63 @@ def test_real_crop_boxes_land_inside_the_frame():
         raise Skip("no segments found")
 
 
+def test_viewpoint_matches_the_independent_geometry():
+    """THE PAYOFF STEP. A sign error here inverts every re-ID tag -- and would look completely
+    plausible, because LEFT and RIGHT are equally common.
+
+    Derivation: with h = cos(a).r + sin(a).s and left = up x h = cos(a).s - sin(a).r, and the camera
+    lying in the -r direction from the animal,
+        dot(left, -r) =  sin(a)     -> sin > 0 : the LEFT flank faces the camera
+        dot(h,    -r) = -cos(a)     -> cos < 0 : we see its FACE
+    Checked here against the INDEPENDENT construction left = up x forward and forward . to_camera,
+    over 200 random cameras and headings.
+    """
+    from tools.heading.conventions import left_from
+    from tools.heading.papersub import Camera, Segment, Track
+    from tools.heading.viewpoint import viewpoint_of
+
+    rng = np.random.default_rng(0)
+    up = np.array([0.0, 0.0, 1.0])
+
+    def rand_rot():
+        R, _ = np.linalg.qr(rng.normal(size=(3, 3)))
+        return R * (-1 if np.linalg.det(R) < 0 else 1)
+
+    for _ in range(200):
+        R = rand_rot()
+        R[:, 2] = up
+        R[:, 0] -= (R[:, 0] @ up) * up
+        R[:, 0] /= np.linalg.norm(R[:, 0])
+        R[:, 1] = np.cross(up, R[:, 0])
+
+        centre = rng.normal(size=3) * np.array([5, 5, 0])
+        cam_c = centre + np.array([3.0, -2.0, 20.0])
+        Rc = rand_rot()
+        cam = Camera(0, np.concatenate([Rc, (-Rc @ cam_c)[:, None]], axis=1),
+                     np.eye(3), 1920, 1080, "f.jpg")
+        tr = Track("0", np.array([0]), centre[None], np.array([[2.0, 1.0, 1.5]]), R[None],
+                   np.array([[0.0, 0, 1, 1]]))
+        seg = Segment(Path("."), "zebr1", "v", "s", {"0": tr}, {0: cam})
+
+        h = rng.normal(size=3)
+        h -= (h @ up) * up
+        if np.linalg.norm(h) < 1e-6:
+            continue
+        h /= np.linalg.norm(h)
+
+        vp = viewpoint_of(seg.alpha_of(tr, 0, h))
+
+        up_s = seg.up_at(tr, 0)
+        to_cam = cam.center - tr.centers[0]
+        to_cam -= (to_cam @ up_s) * up_s
+        to_cam /= np.linalg.norm(to_cam)
+
+        assert (vp["flank"] == "LEFT") == (float(left_from(up_s, h) @ to_cam) > 0), \
+            "the FLANK tag is inverted -- every re-ID match would be wrong"
+        assert (vp["end"] == "FACE") == (float(h @ to_cam) > 0), "FACE/REAR inverted"
+        assert abs(vp["flank_strength"] - abs(float(left_from(up_s, h) @ to_cam))) < 1e-9
+
+
 def main() -> int:
     tests = [v for k, v in sorted(globals().items()) if k.startswith("test_")]
     passed = skipped = failed = 0

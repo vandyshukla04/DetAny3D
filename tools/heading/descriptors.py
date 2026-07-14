@@ -83,46 +83,72 @@ class DenseExtractor:
                                "final_layernorm). Wire it up rather than skipping it.")
 
         self._keys: dict[int, object] = {}
+        self._toks: dict[int, object] = {}
+        self._capture: set[int] = set()               # only these layers are stored
         self._hooks: list = []
-        self._hook_keys()
+        self._install_hooks()
 
-    def _hook_keys(self) -> None:
-        """Capture the KEY projection of every attention block.
+    def _install_hooks(self) -> None:
+        """Capture each block's KEY projection and its OUTPUT tokens -- but only for the layers we
+        actually asked for.
 
-        Located by MODULE NAME rather than a guessed attribute path: the nesting differs across HF
-        versions, and a wrong guess would silently fall back to token features while the sweep
-        table still printed "key" -- i.e. it would fake the very comparison being run.
+        Two reasons this is hooked rather than read from `output_hidden_states`:
+
+        1. SPEED. `output_hidden_states=True` materialises ALL 25 hidden states every forward. At
+           batch 96 / 448px that is ~7.7 GB allocated and transferred per batch -- and the tracklet
+           uses exactly ONE layer. That single flag was the reason the runs crawled.
+        2. The `key` facet is not exposed by HF at all, and it is the descriptor that actually
+           matters for dense correspondence (Amir et al.).
+
+        Hooks are located by MODULE NAME rather than a guessed attribute path: the nesting differs
+        across HF versions, and a wrong guess would silently fall back to token features while the
+        sweep table still printed "key" -- faking the very comparison being run.
         """
         import re
 
-        pat = re.compile(r"(?:^|\.)layers?\.(\d+)\..*\b(?:key|k_proj)$")
+        key_pat = re.compile(r"(?:^|\.)layers?\.(\d+)\..*\b(?:key|k_proj)$")
+        blk_pat = re.compile(r"(?:^|\.)layers?\.(\d+)$")
 
-        def mk(i):
+        def mk(store, i):
             def hook(_m, _inp, out):
-                self._keys[i] = out.detach()
+                if i in self._capture:
+                    store[i] = (out[0] if isinstance(out, tuple) else out).detach()
             return hook
 
+        n_key = n_blk = 0
         for name, mod in self.model.named_modules():
-            m = pat.search(name)
+            m = key_pat.search(name)
             if m and hasattr(mod, "weight"):
-                self._hooks.append(mod.register_forward_hook(mk(int(m.group(1)))))
+                self._hooks.append(mod.register_forward_hook(mk(self._keys, int(m.group(1)))))
+                n_key += 1
+                continue
+            m = blk_pat.search(name)
+            if m:
+                self._hooks.append(mod.register_forward_hook(mk(self._toks, int(m.group(1)))))
+                n_blk += 1
 
-        if not self._hooks:
-            seen = [n for n, _ in self.model.named_modules() if "attention" in n][:12]
+        if not n_key or not n_blk:
+            seen = [n for n, _ in self.model.named_modules()][:20]
             raise RuntimeError(
-                "could not hook any key projection. Fix the pattern rather than falling back to "
-                f"token features -- that would fake the token-vs-key comparison. Saw: {seen}")
+                f"hooked {n_key} key projections and {n_blk} blocks -- expected both. Fix the "
+                f"patterns rather than falling back to token features, which would fake the "
+                f"token-vs-key comparison. Module names look like: {seen}")
 
     def grids(self, imgs: np.ndarray, facet: str, size: int,
               layers: "list[int]") -> dict[int, np.ndarray]:
-        """ONE forward pass -> descriptor grids for MANY layers.
+        """ONE forward pass -> descriptor grids for the requested layers, and ONLY those.
 
-        `output_hidden_states=True` already returns every block's output, and the key hooks capture
-        every block's keys -- from a SINGLE forward. Sweeping layers by calling `grid()` once per
-        layer re-runs the entire ViT 24 times for data it already had, which is what made the first
-        sweep take hours instead of minutes.
+        The hooks capture every block's keys and outputs from a single forward, so a layer sweep is
+        free -- calling `grid()` once per layer re-runs the whole ViT for data it already had, which
+        is what made the first sweep take hours.
+
+        But we capture ONLY the layers asked for. `output_hidden_states=True` (the previous
+        approach) materialises all 25 hidden states every forward: ~7.7 GB per batch at 96/448,
+        when a single-layer run needs one. That flag was why the runs crawled.
         """
         torch = self.torch
+        want = [self.n_layers if l < 0 else l for l in layers]
+
         with torch.no_grad():
             x = torch.from_numpy(np.ascontiguousarray(imgs)).to(self.device)
             x = x.permute(0, 3, 1, 2).float().div_(255.0)
@@ -131,54 +157,31 @@ class DenseExtractor:
             x = (x - self.mean) / self.std
 
             self._keys.clear()
-            out = self.model(pixel_values=x, output_hidden_states=True)
+            self._toks.clear()
+            self._capture = {l - 1 for l in want}               # hook indices are 0-based
+            self.model(pixel_values=x)
 
             gh = gw = size // self.patch
             n = gh * gw
             res: dict[int, np.ndarray] = {}
-            for li in layers:
+            for li, orig in zip(want, layers):
                 if facet == "key":
-                    h = self._keys[li - 1]                      # hook index is 0-based
+                    h = self._keys[li - 1]
                     if h.dim() == 4:                            # (B, heads, T, dh) -> (B, T, D)
                         h = h.permute(0, 2, 1, 3).reshape(h.shape[0], h.shape[2], -1)
                 else:
-                    h = self._final_norm(out.hidden_states[li])
+                    h = self._final_norm(self._toks[li - 1])    # == get_intermediate_layers(norm=True)
                 h = torch.nn.functional.normalize(h[:, -n:].float(), dim=-1)
-                res[li] = h.reshape(-1, gh, gw, h.shape[-1]).cpu().numpy()
+                res[orig] = h.reshape(-1, gh, gw, h.shape[-1]).cpu().numpy()
+
+            self._capture = set()
+            self._keys.clear()
+            self._toks.clear()
             return res
 
     def grid(self, imgs: np.ndarray, cfg: Config) -> np.ndarray:
-        """(B, H, W, 3) uint8 -> (B, gh, gw, D) float32, L2-normalised.
-
-        The ENTIRE body runs under no_grad. It used to end outside it, so `_final_norm` (which has
-        parameters) produced a grad-carrying tensor and `.numpy()` refused. The `key` facet
-        survived only because the hook already `.detach()`es -- which meant the token facet, and
-        every layer past the first two configs, never ran at all.
-        """
-        torch = self.torch
-        with torch.no_grad():
-            x = torch.from_numpy(np.ascontiguousarray(imgs)).to(self.device)
-            x = x.permute(0, 3, 1, 2).float().div_(255.0)
-            x = torch.nn.functional.interpolate(x, size=(cfg.size, cfg.size),
-                                                mode="bicubic", align_corners=False)
-            x = (x - self.mean) / self.std
-
-            self._keys.clear()
-            out = self.model(pixel_values=x, output_hidden_states=True)
-
-            li = self.n_layers if cfg.layer < 0 else cfg.layer  # 1-indexed block
-            gh = gw = cfg.size // self.patch
-            n = gh * gw
-
-            if cfg.facet == "key":
-                h = self._keys[li - 1]                          # hook index is 0-based
-                if h.dim() == 4:                                # (B, heads, T, dh) -> (B, T, D)
-                    h = h.permute(0, 2, 1, 3).reshape(h.shape[0], h.shape[2], -1)
-            else:
-                h = self._final_norm(out.hidden_states[li])     # [0] is the embedding, not a block
-
-            h = torch.nn.functional.normalize(h[:, -n:].float(), dim=-1)
-            return h.reshape(-1, gh, gw, h.shape[-1]).cpu().numpy()
+        """(B, H, W, 3) uint8 -> (B, gh, gw, D) float32, L2-normalised. One layer."""
+        return self.grids(imgs, cfg.facet, cfg.size, [cfg.layer])[cfg.layer]
 
     def close(self) -> None:
         for h in self._hooks:

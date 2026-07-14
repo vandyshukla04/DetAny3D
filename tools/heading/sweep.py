@@ -32,17 +32,21 @@ import numpy as np
 from tools.heading.cropset import CropSet
 from tools.heading.descriptors import DEFAULT_MODEL, Config, DenseExtractor, foreground
 from tools.heading.split import video_split
-from tools.heading.template import Accumulator, AxisTemplate, opposite_slot
+from tools.heading.template import Accumulator, AxisTemplate, choose, opposite_slot
 
 MODES = ("2way", "app4", "geo", "prior")
 
 
 def score_one(tmpl: AxisTemplate, g, it, stat, prior: float) -> None:
-    """Score one crop under one template, into `stat` (all four modes)."""
+    """Score one crop under one template, into `stat` -- all four modes, from ONE scoring.
+
+    The descriptors are the expensive part and every mode shares them, so `score_faces` is called
+    exactly once and the (trivial) decision rules are applied to its output. Calling `predict_face`
+    per mode would recompute the descriptors three times over.
+    """
     if it.species not in tmpl.templates:
         return
-    fg = foreground(g, it.instance)
-    s = tmpl.score_faces(g, fg, it.face_uv, it.face_ids, it.species)
+    s = tmpl.score_faces(g, foreground(g, it.instance), it.face_uv, it.face_ids, it.species)
     if np.isnan(s).all():
         return
 
@@ -53,11 +57,9 @@ def score_one(tmpl: AxisTemplate, g, it, stat, prior: float) -> None:
     r["2way"] += (int(sv[h] >= sv[t]), 1)            # appearance cue, axis question REMOVED
     r["app4"] += (int(np.argmax(sv) == h), 1)        # appearance also picks the axis (the 39%)
     if it.geo_axis >= 0:
-        p_geo, _ = tmpl.predict_face(g, fg, it.face_uv, it.face_ids, it.species, axis=it.geo_axis)
-        p_pri, _ = tmpl.predict_face(g, fg, it.face_uv, it.face_ids, it.species,
-                                     axis=it.geo_axis, axis_prior=prior)
-        r["geo"] += (int(p_geo == h), 1)
-        r["prior"] += (int(p_pri == h), 1)
+        r["geo"] += (int(choose(s, it.face_ids, axis=it.geo_axis)[0] == h), 1)
+        r["prior"] += (int(choose(s, it.face_ids, axis=it.geo_axis,
+                                  axis_prior=prior)[0] == h), 1)
 
 
 def _row(label, stat):
@@ -116,8 +118,8 @@ def main() -> int:
         sizes = (448, 224)
         print(f"{ex.n_layers} layers, {ex.dim}-d, patch {ex.patch}")
         print(f"{len(layers)*len(facets)*len(sizes)} configs, but only "
-              f"{len(facets)*len(sizes)*2} model passes: `output_hidden_states` already returns "
-              f"EVERY layer from one forward, so a layer sweep is free.\n")
+              f"{len(facets)*len(sizes)*2} model passes: forward hooks capture every requested "
+              f"layer from ONE forward, so a layer sweep is nearly free.\n")
 
         print(f"{'config':<20s} {'2WAY':>6s} {'APP4':>6s} {'GEO':>6s} {'PRIOR':>6s}   "
               f"per-species (2way/prior)")

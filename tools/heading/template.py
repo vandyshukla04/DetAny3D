@@ -47,7 +47,7 @@ from tools.heading.descriptors import Config, DenseExtractor, axis_profile, fore
 if TYPE_CHECKING:
     from tools.heading.cropset import CropSet
 
-__all__ = ["AxisTemplate", "opposite_slot"]
+__all__ = ["AxisTemplate", "Accumulator", "choose", "opposite_slot"]
 
 
 def opposite_slot(face_ids: np.ndarray, j: int) -> int:
@@ -110,38 +110,51 @@ class AxisTemplate:
             done.update({j, t})
         return out
 
-    def predict_face(self, g, fg, face_uv, face_ids, species, *,
-                     axis: int | None = None, axis_prior: float = 0.0) -> tuple[int, float]:
-        """Best front-face slot + the margin over the runner-up (a natural confidence).
+    def predict_face(self, g, fg, face_uv, face_ids, species, **kw) -> tuple[int, float]:
+        """Convenience: score, then choose. Callers that need several choices from the SAME scores
+        (e.g. the sweep, which compares 4-way vs geometry-restricted vs prior) must call
+        `score_faces` once and `choose` N times -- otherwise they pay for the descriptors N times
+        over, which is exactly what made the sweep crawl."""
+        return choose(self.score_faces(g, fg, face_uv, face_ids, species), face_ids, **kw)
 
-        `axis`      -- if given (a slot on the geometric body axis), ONLY that axis' two ends are
-                       considered. GEOMETRY PROPOSES, APPEARANCE DISPOSES: picking the axis is
-                       geometry's job (the box's longest horizontal axis is right 87% of the time),
-                       and appearance is measurably bad at it. Letting appearance override geometry
-                       is what dropped the 4-way to 39% while the 2-way cue was 83.7%.
-        `axis_prior`-- soft version: add this bonus to the ends of the geometric axis instead of
-                       forbidding the other one outright. A principled middle ground, since the
-                       geometric axis is right 87% of the time, not 100%.
 
-        The MARGIN is what the temporal decoder consumes. A head-on animal yields a near-zero
-        margin, and that is honest -- the cue genuinely is not visible in that frame.
-        """
-        s = self.score_faces(g, fg, face_uv, face_ids, species)
-        if np.isnan(s).all():
-            return -1, 0.0
+def choose(scores: np.ndarray, face_ids, *, axis: int | None = None,
+           axis_prior: float = 0.0) -> tuple[int, float]:
+    """Pick the front face from already-computed scores. Pure -- no model, no descriptors.
 
-        s = np.where(np.isnan(s), -np.inf, s).astype(np.float64)
-        if axis is not None:
-            ends = {int(axis), opposite_slot(face_ids, int(axis))}
-            if axis_prior > 0:
-                s = s + np.array([axis_prior if j in ends else 0.0 for j in range(4)])
-            else:                                          # hard restriction to the geometric axis
-                s = np.array([s[j] if j in ends else -np.inf for j in range(4)])
+    Kept separate from `score_faces` because the expensive part (the descriptors) is shared across
+    every decision rule, while the rules themselves are trivial. The sweep compares three of them
+    on the same crop; fusing them into one call meant recomputing the descriptors three times.
 
-        order = np.argsort(s)[::-1]
-        best = int(order[0])
-        runner = s[order[1]] if np.isfinite(s[order[1]]) else s[best]
-        return best, float(s[best] - runner)
+    `axis`       -- a slot on the geometric body axis. GEOMETRY PROPOSES, APPEARANCE DISPOSES: only
+                    that axis' two ends are considered. Picking the axis is geometry's job (the
+                    box's longest horizontal axis is right 87% of the time) and appearance is
+                    measurably bad at it -- letting appearance override geometry is what dropped the
+                    4-way to 39% while the head/tail cue itself was 83.7%.
+    `axis_prior` -- the soft version: a bonus on the geometric axis' ends rather than an outright
+                    ban on the others. The principled middle ground, since geometry is right 87% of
+                    the time, not 100%.
+
+    Returns (slot, margin). The MARGIN is what the temporal decoder consumes as confidence: a
+    head-on animal yields a near-zero margin, and that is honest -- the cue genuinely is not visible
+    in that frame.
+    """
+    s = np.asarray(scores, dtype=np.float64)
+    if np.isnan(s).all():
+        return -1, 0.0
+    s = np.where(np.isnan(s), -np.inf, s)
+
+    if axis is not None:
+        ends = {int(axis), opposite_slot(face_ids, int(axis))}
+        if axis_prior > 0:
+            s = s + np.array([axis_prior if j in ends else 0.0 for j in range(len(s))])
+        else:                                              # hard restriction to the geometric axis
+            s = np.where([j in ends for j in range(len(s))], s, -np.inf)
+
+    order = np.argsort(s)[::-1]
+    best = int(order[0])
+    runner = s[order[1]] if np.isfinite(s[order[1]]) else s[best]
+    return best, float(s[best] - runner)
 
 
 class Accumulator:

@@ -1,6 +1,6 @@
 # 3D Animal Heading from Locomotion, 3D Cues and DINOv3
-### Method, experiments, and the progression of decisions
-*A report. Findings are stated as measured; no conclusions are drawn beyond them.*
+### Method, metrics, and results
+*What we did, what each metric means, and the measured numbers.*
 
 ---
 
@@ -132,22 +132,34 @@ what `|sin α|` quantifies.
 ## 4. Formulae
 
 **Ground basis (per segment).** `up` = consensus over box axes (axes only; signs are discarded).
-`e1 ⟂ up` deterministic, `e2 = up × e1`. World azimuth of a horizontal direction `d`:
+`e1 ⟂ up` deterministic, `e2 = up × e1`. Azimuth of a horizontal direction `d` (its compass bearing
+*within* the ground plane — this **is** the heading, expressed as one scalar):
 
 ```
 azimuth(d) = atan2(d·e2, d·e1)
 ```
 
+**Heading candidates.** Project the two horizontal box axes onto the ground plane to get unit
+directions `a`, `b`. Their four signed directions are the candidate headings:
+
+```
+H = { +a, −a, +b, −b }              ĥ ∈ H
+```
+
+The box gives the two *axes*; it does not say which of the four directions is the front. The
+predicted heading is therefore **one of these four discrete candidates** — we select a direction, we
+do not regress a free angle.
+
 **Allocentric angle α** (per instance). `r` = horizontalised camera→animal ray, `s = up × r`,
 so `(r, s, up)` is right-handed:
 
 ```
-α = atan2(h·s, h·r)          h = heading (world, horizontal)
-h = cos α · r + sin α · s
+α = atan2(ĥ·s, ĥ·r)         h = cos α · r + sin α · s
 ```
 
-α is the animal's orientation **relative to the viewing ray**, which is what a crop determines. It is
-exactly DetAny3D's `alpha` (the allocentric/observation angle).
+α is the animal's orientation **relative to the viewing ray** — the quantity a single crop
+determines, and exactly DetAny3D's `alpha` (the allocentric/observation angle). Because ĥ is one of
+four discrete candidates, α is **discrete per frame**, not continuous.
 
 **Viewpoint tag — how visibility is computed (the deliverable).**
 The animal's own left side is `left = up × h = cos α · s − sin α · r`, and the camera lies in the
@@ -194,255 +206,206 @@ slices, and average within each bin:
 P[b] = mean{ f_p : patch p in bin b },   b = 0 (rump) … B−1 (head)
 ```
 
-**Score** (centred — see §6.2). With the species template `T`:
+**Score of a candidate.** The species template `T` is a (B, D) matrix — the mean anatomical profile,
+rump→head, over the locomotion-labelled training crops. A candidate's profile `P` is scored against
+it after removing, from **both**, the component shared across bins (the "animal-ness" every patch
+carries), so that only the along-body variation is compared:
 
 ```
-μ      = Σ_b w_b P[b] / Σ_b w_b                (w_b = patch count in bin b)
-score  = Σ_b w_b ⟨ P[b] − μ , T̂c[b] ⟩ / Σ_b w_b        T̂c = centre(T) / ‖centre(T)‖
+P̄   = Σ_b w_b P[b] / Σ_b w_b            weighted mean of P over its OCCUPIED bins   (w_b = patch count)
+T̄   = (1/B) Σ_b T[b]                    UNweighted mean of T over its B bins
+Tᶜ  = T − T̄ ,   T̂ᶜ = Tᶜ / ‖Tᶜ‖_F        Frobenius norm over ALL bins and channels (one scalar)
+
+S(candidate) = (1/Σ_b w_b) Σ_b w_b ⟨ P[b] − P̄ , T̂ᶜ[b] ⟩
 ```
 
-The profile of the **opposite** hypothesis is the exact reverse of this one, so 4 hypotheses cost 2
-profile computations.
+Three details that fix the formula exactly (verified against `template.py`):
+- **`P̄` is patch-count-weighted** over occupied bins; **`T̄` is unweighted** over all B bins.
+- **The hat is a single Frobenius normalisation of the whole centred template** (over all bins and
+  channels together), **not per bin**.
+- **The crop profile `P` is left un-normalised.** Its magnitude is the along-axis *contrast*, which
+  is itself evidence — a true body axis has a strong head→rump gradient, a cross-body axis is nearly
+  flat — so keeping it lets the true axis win on alignment *and* contrast. Only the template carries
+  the hat.
+
+The profile of the **opposite** candidate is the exact reverse of this one (the bins read back to
+front), so the four candidates cost two profile computations.
+
+**Selecting the heading.** Geometry proposes the axis; appearance resolves the sign:
+
+```
+ĥ = argmax_{candidate ∈ H} [ S(candidate) + G(candidate) ]
+
+G(candidate) = 0     if candidate is one of the two directions of the PROPOSED axis
+             = −∞    otherwise                       (a hard mask, not a finite bonus)
+```
+
+i.e. the maximisation is **restricted to the two directions of the geometrically-proposed axis**, and
+appearance chooses only between them. The **proposed axis** is the horizontal box axis with the
+larger ground-plane-projected extent:
+
+```
+proposed axis = argmax_c  d_c · ‖ (I − up upᵀ) R[:,c] ‖
+```
+
+— the box's dimension along local axis `c`, scaled by how much of that axis survives projection onto
+the ground plane. (Geometry is measurably better at the axis than appearance is; §Design choices.)
 
 ---
 
-## 5. Method
+## 5. Method summary
 
 ```
-1.  LOCOMOTION names the head            (walking frames only; free; 25,554 labels)
-2.  the TEMPLATE is the mean profile of those crops, per species   (nothing is trained)
-3.  DINOv3 TRANSPORTS it: score the 4 horizontal faces of a new box against the template
-4.  GEOMETRY proposes the axis, appearance disposes the sign
-5.  α → the VIEWPOINT TAG (which flank, how broadside, face or rear)
+1.  LOCOMOTION names the head    a walking animal's world velocity is its heading — free, signed
+2.  TEMPLATE = the mean rump→head profile of those crops, per species   (nothing is trained)
+3.  DINOv3 TRANSPORTS it         score the box's 4 candidate directions against the template
+4.  GEOMETRY proposes the axis   the hard mask G above; appearance resolves only the sign
+5.  α → the VIEWPOINT TAG        which flank, how broadside, face or rear
 ```
 
-Nothing in step 2 is trained: the template is an **average**.
+Nothing is trained: the template is an average, and scoring, axis selection and the viewpoint tag are
+all closed-form.
 
 ---
 
-## 6. Progression of the work
+## 6. Design choices (each measured)
 
-### 6.0 Labels: locomotion (§ measured)
+- **DINOv3 layer 24, token facet, 224 px.** We swept transformer layer, facet (block-output *token*
+  vs the attention *key* projection) and input resolution. The last-layer token output is best; on
+  zebras it is the difference between chance and a working cue (head-vs-tail 52% at other settings,
+  79–81% here). 224 px and 448 px are within a point, so 224 is used (4× cheaper). DINOv3's dense
+  features are the frozen backbone throughout — nothing is fine-tuned.
 
-A walking animal's world velocity is its heading, and — unlike the box — it is **signed**.
+- **Score the gradient, not the descriptors.** Every patch on an animal is first of all "animal", so
+  an un-centred cosine between a candidate's profile and the template sits near 0.9 for *any* axis,
+  including a wrong one — a flat cross-body profile scores ~0.81 of the true axis'. Centring both
+  profiles across bins removes that shared component and compares only the head→rump gradient; a
+  flat profile then scores ~0.
 
-| | |
-|---|---|
-| **labels produced** | **25,554** across 4 species / 60 videos, **zero human annotation** |
-| per species | elephant 7,229 · rhino 10,914 · zebra 5,740 · giraffe 1,671 |
-| **box-vs-motion agreement** (two independent signals) | median cos **0.984** after gating; **0.953** raw (rhino .979, elephant .969, giraffe .934, zebra .818). Random baseline = 0.707. |
-| gates | displacement > 0.30 body-lengths per 15-frame window **and** cos(velocity, face normal) > 0.8 |
-| "longest horizontal axis" shortcut picks the wrong axis | **13%** of the time (zebra **26%**) — so a sign-only cue is capped at 87% |
-| visual check | the arrow lands on elephant trunks, rhino horns, giraffe necks, and grazing zebras' lowered heads (`preview_labels.py`) |
+- **Geometry proposes the axis; appearance resolves the sign.** The box's longer horizontal axis is
+  the body axis on **87%** of frames (zebra 74%), whereas appearance is unreliable at *choosing an
+  axis*. Restricting the search to the two ends of the proposed axis and asking appearance only for
+  the sign is the hard mask `G` in §4.
 
-### 6.1 Hypotheses tested and rejected
-
-| cue | result |
-|---|---|
-| GroundingDINO `"head"` prompt | **failed** — domain shift; grounds onto the whole animal. Failed at 149 px as well as 69 px. |
-| Mask taper / "hindquarters are bulkier" | **failed** — view-dependent |
-| Motion at inference | **rejected** — `velocities` never populated; grazing animals move 10–25% of a body length per segment |
-| **Image-space** temporal smoothing | **made it worse**: 96.8% → 79.0%. The drone moves, so a stationary animal's *projected* angle jumps; smoothing it smooths the camera. |
-| **Track-level splits** | **leaky**: reported 96.7% while the model visibly broke on unseen footage. All numbers below use a **video-level** split. |
-| k-means over DINOv3 patch tokens | **16.6%** (below the 25% chance line). **Retracted as a valid negative** — it used global k-means across species, a 14×14 grid, the last layer only, and cluster centroids instead of correspondence. |
-
-### 6.2 The DC-domination bug and its correction
-
-**Symptom.** Head/tail on the true axis was **83.7%**, but the 4-way front-face choice was **39.4%**.
-The foreground PCA showed a clean rump→head colour gradient while the *predicted* head landed in rump
-colours.
-
-**Cause.** Every patch on an animal is, first of all, "animal". So `cos(profile_bin, template_bin)`
-≈ 0.9 **for any axis profiled along** — including the wrong one. A profile taken across the animal's
-**width** is nearly flat but still scored high on that shared component. The discriminative signal is
-the **variation along the axis**, not the absolute descriptors.
-
-**Evidence in the figures:** the printed decision margins were `+0.007`, `+0.003`, `+0.000` — all four
-hypotheses within ~0.005 of each other. The choice was noise in the third decimal.
-
-**Correction.** Centre the profile and the template across bins ⇒ score the **gradient**.
-
-| | uncentred | centred |
-|---|---|---|
-| true axis | +1.000 | **+0.260** |
-| wrong axis (flat) | **+0.814** | **0.000** |
-| reversed (180°) | +0.362 | **−0.231** |
-
-**Falsifiable prediction made before the run:** *the margins go from ~0.005 to ~0.2, or the diagnosis
-is wrong.* **Measured after: decision margin median = 0.1545 (≈30×).**
-
-Two sub-corrections found while testing, both silent:
-- the profile must **not** be unit-normalised — its magnitude *is* its contrast along the axis, which
-  is evidence; normalising rescales a flat profile into amplified noise;
-- centring must use **only the bins that carry evidence** — an empty bin is a zero row, and including
-  it drags the centre toward the origin and lets the DC creep back in.
-
-### 6.3 Geometry proposes, appearance disposes
-
-Letting appearance choose the axis was letting it override geometry at the one thing it is bad at.
-Restricting the hypotheses to the **two ends of the geometric body axis** (chance 50%) and asking
-appearance only for the **sign** is reported as `GEO`; a soft bonus on that axis is reported as
-`PRIOR`.
-
-### 6.4 Instance masks (the herd problem)
-
-Zebra head/tail sat at **52%** — exactly chance — while giraffe (never occluded) was at 100%. Zebras
-are the herd species: crops contain several **overlapping** zebras, and an appearance-only foreground
-mask pools a **neighbour's rump into the target's head bin**.
-
-SAM3 masks resolve this. The join (`obj_<N>` ↔ track `N`; `frame_%06d.png` ↔ `frame_%06d.jpg`) was
-**asserted, not assumed** — each mask's centroid is checked against the target's own 2D box:
-
-| | centroid offset (1.0 = box edge) |
-|---|---|
-| accepted masks | **0.13** (p90 0.24) — on their own animal |
-| rejected masks | **4.87** — five box-widths away, a *different* animal |
-
-| species | mask hit-rate |
-|---|---|
-| rhino | 100% |
-| giraffe | 100% |
-| zebra | 94% |
-| elephant | 91% |
-| **all** | **96%** (2% rejected by the centroid check; 1% no `obj_` dir; 1% frame-stride) |
-
-### 6.5 The DINOv3 configuration sweep
-
-Two prior assumptions were tested and **both were contradicted by the data**:
-
-| assumed | measured |
-|---|---|
-| a **mid-layer** would win (part semantics peak mid-network) | the **last layer (24)** wins |
-| the **`key` facet** would win (Amir et al., *Deep ViT Features as Dense Visual Descriptors*) | the **`token`** facet wins |
-
-The difference is not marginal — it is the entire zebra result:
-
-```
-zebra 2-way:   L12/key 52%    L24/key 52%    L12/token 52%    L24/token 79–81%
-```
-
-Every other configuration leaves zebra at chance; only the **last-layer token output** separates them.
-(DINOv3's stated contribution, Gram anchoring, targets the quality of the *final* dense features; Amir
-et al. studied the original DINO.)
-
-**Full sweep, held out by video, SAM masks on** (chance: 2WAY 50%, others 25%):
-
-| config | 2WAY | APP4 | GEO | PRIOR | eleph | giraffe | rhino | zebra (2way) |
-|---|---|---|---|---|---|---|---|---|
-| L12/key/448 | 85.1 | 73.7 | 79.8 | 80.6 | 74 | 100 | 94 | 52 |
-| L16/key/448 | 84.7 | 75.1 | 79.5 | 80.3 | 74 | 100 | 93 | 53 |
-| L18/key/448 | 83.7 | 70.7 | 78.4 | 79.2 | 70 | 100 | 93 | 52 |
-| L24/key/448 | 87.9 | 77.7 | 81.8 | 83.0 | 83 | 100 | 96 | 52 |
-| L12/token/448 | 87.4 | 76.4 | 81.4 | 81.0 | 77 | 100 | 96 | 52 |
-| L24/token/448 | 93.1 | 81.7 | 86.7 | 87.2 | 82 | 100 | 98 | 79 |
-| L12/token/224 | 87.2 | 75.5 | 81.2 | 80.2 | 76 | 100 | 96 | 53 |
-| **L24/token/224** | **93.6** | **82.5** | **87.3** | **87.5** | 82 | 100 | 98 | **81** |
-
-- **224 ≈ 448** (93.6 vs 93.1) — resolution buys nothing; 224 costs 4× less.
-- **APP4 = 82.5%** vs the **supervised MLP baseline of 79.8%** on the identical 4-way metric — with
-  **nothing trained**.
-
-### 6.6 Track-level decoding (Viterbi)
-
-**Hypothesis tested:** per-frame errors are independent, so integrating over a track in **world
-azimuth** (a shortest path that permits genuine turns but penalises instantaneous 180° flips) should
-cancel them.
-
-**Result: it did not.**
-
-| config | per-frame RAW | per-frame VITERBI |
-|---|---|---|
-| L12/key/448 | 79.8% | 79.9% (+0.1) |
-| L24/token/224 | **87.4%** | 87.7% (+0.3) |
-
-**Why (measured).** Per-track accuracy is **bimodal**, not noisy. On zebra under L12/key:
-
-| | tracks <20% correct | 20–80% | >80% |
-|---|---|---|---|
-| zebra (n=72) | **46** | 12 | 14 |
-| rhino (n=95) | 9 | 23 | 63 |
-| elephant (n=27) | 5 | 10 | 12 |
-
-The errors are **whole-track inversions**, not sporadic flips. A smoothness prior is designed to
-*preserve* a coherent trajectory, so it cannot un-invert a track that is self-consistently backwards.
-
-The inversions were removed **at the source** by the configuration change (§6.5), not by the decoder:
-
-| | L12/key/448 | L24/token/224 |
-|---|---|---|
-| per-frame (2 candidates, chance 50%) | 79.8% | **87.4%** |
-| zebra | 42.0% *(below chance)* | **73.7%** |
-| elephant | 75.1% | 77.3% |
-| rhino | 88.2% | 91.9% |
-| giraffe | 100% | 100% |
-
-### 6.7 Engineering faults found and corrected (all silent)
-
-| fault | consequence | correction |
-|---|---|---|
-| `bbox_2d` (518-space) read as full-res | every crop cut from the **background**; a model that had never seen an animal reported **91.8% flank accuracy** | `Segment.scale` derives the ratio and `check_scale()` asserts it against the projected 3D centres |
-| checkpoint carried no record of its split | a head trained under one split, scored under another, reported **94.3%** where the truth was **79.8%** | `split_fingerprint()` in every checkpoint; every evaluator calls `assert_matches()` or dies |
-| `_final_norm` outside `torch.no_grad()` | the `token` facet and every layer past the first two configs **never ran** | whole forward under `no_grad` |
-| `output_hidden_states=True` | materialised **all 25** hidden states (~7.7 GB/batch) to use one | forward hooks capture only the requested layers |
-| `score_faces` called 3× per crop | 3× the descriptor cost | scoring separated from choosing (`choose()`) |
-| **`np.load` returns a lazy `NpzFile`** | **every `z[key][i]` re-inflated the whole 259 MB member — 4,113 ms per crop, ~6.6 h to score the held-out set.** This, not the GPU, was the entire slowness. | `load_npz()` materialises once (4.1 s, then 0.001 ms); every consumer routed through it |
+- **SAM3 instance masks.** The frames are herds (3.4 animals/frame). An appearance-only foreground
+  mask pools a neighbour's patches into the target's profile; on zebras — the herd species — this
+  put head-vs-tail at chance (52%). A per-instance SAM mask restricts the profile to the target and
+  removes it. The mask→track join is verified by mask-centroid-inside-own-box (accepted masks sit at
+  0.13 of a box half-width; a neighbour's would sit ~5×) rather than assumed.
 
 ---
 
-## 7. Test cases (all in `tools/heading/tests/`, 26 total)
+## 7. Metrics
 
-| test | what it prevents |
-|---|---|
-| allocentric round-trip under a random camera | a sign slip that is invisible in the loss and fatal in the output |
-| `α = 0` ⇔ walking directly away from the camera | α off by π, which nothing else would catch |
-| **viewpoint tag vs independent geometry** (200 random cameras) | an inverted LEFT/RIGHT tag — which would look plausible, since both are equally common |
-| reversing a hypothesis exactly reverses the profile | 2 of the 4 scores silently wrong (the code derives them by reversal) |
-| centring makes a flat profile score exactly 0 | the DC bug returning |
-| empty bins contribute **exactly** nothing | an occluded rump changing the score |
-| profile magnitude is preserved | contrast (which is evidence) being normalised away |
-| `load_npz` returns a dict, `CropSet` never holds an `NpzFile` | the 4,113 ms-per-crop bug returning |
-| shared-vs-per-frame PCA basis (4.6× more stable) | the paper figure's central claim becoming decorative |
-| a real 180° turn survives Viterbi; an injected single-frame flip is removed | a decoder that does only one of the two |
-| synthetic `WALK → turn → WALK` is **rejected** by the bridge filter | unsafe stationary labels |
-| real-data 518-scale check over 30 segments | the background-crop bug returning |
+The predicted heading is one of four discrete box-axis directions (§4). We evaluate what the method
+*decides*, not the box it inherits:
 
----
+- **Sign accuracy** — of the two directions of the true body axis, is the correct **head end**
+  chosen? Chance 50%. This is the head-vs-tail decision DINOv3 makes.
+- **Flank accuracy** — is the **camera-facing side** (LEFT/RIGHT) named correctly? Computed only
+  where a flank is actually visible, `|sin α| ≥ 0.35`; elsewhere the animal is head-on and there is
+  no flank to name. This is the tag re-ID consumes.
+- **|sin α| bands** — sign and flank against how broadside the animal is, so the *distribution* of
+  errors is visible (head-on / oblique / broadside).
 
-## 8. Results, as measured
+**Why not an angular (azimuth) error.** Azimuth *is* the heading (a compass bearing in the ground
+plane), but the azimuth *error* does not isolate the method. Because the heading is quantised to the
+box's face normals, a correct prediction still inherits the box-axis error and a wrong one is a ~180°
+flip — nothing between — so acc@45° ≡ sign accuracy, adding no information. On the human check it is
+worse than uninformative: the annotator labelled *which box face is the front*, so the reference
+heading **is** a box-face direction from the very set the prediction chooses from, and azimuth error
+can only read 0° (right face) or 180° (wrong face). Sign and flank are the metrics that mean the same
+thing across all three test sets. *(For context, the box axes themselves sit a median 9.1° from the
+motion reference — the ceiling any face-selection method inherits.)*
 
-**Setting:** held out by **video** (never by track or frame); the two human-locked zebra videos are
-excluded from training permanently; SAM instance masks; `L24/token/224`; template = the mean profile
-of walking crops (**nothing trained**).
-
-| quantity | value | chance |
-|---|---|---|
-| head-vs-tail on the true axis (2-way) | **93.6%** | 50% |
-| front face, appearance chooses the axis too (APP4) | **82.5%** | 25% |
-| front face, geometry proposes the axis (GEO) | **87.3%** | 25% |
-| front face, soft axis prior (PRIOR) | **87.5%** | 25% |
-| supervised MLP baseline (for comparison; trained) | 79.8% | 25% |
-| per-frame over held-out tracks (2 candidates) | **87.4%** | 50% |
-| — zebra | 73.7% | 50% |
-| — elephant | 77.3% | 50% |
-| — rhino | 91.9% | 50% |
-| — giraffe | 100% | 50% |
+The **reference** differs by test set: on walking animals it is the animal's own motion direction; on
+the stationary transfer set it is the motion direction from either side of a `WALK→STAND→WALK` stop
+(§8); on the human set it is a person's face annotation.
 
 ---
 
-## 9. Not yet tested
+## 8. Results (`L24/token/224`, SAM masks, held out by video, nothing trained)
 
-- **Standing animals.** Every number above is measured on **walking** frames, because that is where
-  motion labels exist. **133,809 frames (84%) are stationary and none of them have been tested.**
-  A stationary test set has been built and not yet run: `bridges.py` yields **4,837** labelled
-  stationary frames from `WALK → STAND → WALK` runs whose before/after headings agree within 30°
-  (median agreement **0.98**); only 48% of stops pass that filter (zebra 29%).
-- **Human face-locks.** 11,084 human-annotated instances on 2 videos of *grazing* zebras, held out of
-  training. ⚠️ The join must go through the **world direction**, not the face index: papersubdata
-  carries **raw** rotations while the locks index the **canonical** ones, and **16.9% (1,874/11,084)**
-  differ by 180°.
-- **DetAny3D integration.** `data_creator/wildbox.py:270` currently feeds the `alpha` head a hardcoded
-  `0.0`. 3D/BEV AP must not regress against the 5-seed baseline (**3.97 ± 0.65**).
-- **The re-ID payoff.** Gallery accuracy with vs without side-consistent matching.
+### 8.1 Walking animals — held-out videos (n = 5,768; appearance rows 5,767, see below)
+
+| setting | sign | flank* |
+|---|---:|---:|
+| random sign | 46.9% | — |
+| locomotion reference *(= the label)* | 100% | — |
+| appearance, oracle axis *(axis given; isolates the sign)* | 93.5% | — |
+| **full method** | **87.4%** | **95.0%** |
+
+Per species, full method — sign: rhino 91.9% · elephant 77.3% · zebra 73.8% · giraffe 100% (n=30).
+
+*One crop of 5,768 is exactly end-on: its body axis projects to a point, there is no profile, and the
+appearance rows **abstain** on it (n=5,767). The geometry-only rows keep all 5,768. An abstention,
+not a dropped sample.*
+
+### 8.2 Stationary animals — the transfer test (n = 1,404)
+
+The template is built only from walking crops; here it is scored on **standing** animals, on
+held-out videos, with references from `WALK → STAND → WALK` stops whose before/after headings agree
+within 30° (the animal provably did not turn). Labels: 4,833 bridge crops exist; 3,429 fall in
+training videos and are discarded; **1,404** are held out and tested.
+
+| | sign | flank* |
+|---|---:|---:|
+| walking (§8.1) | 87.4% | 95.0% |
+| **standing** | **69.1%** | **89.4%** |
+| difference | −18.3 pts | −5.6 pts |
+
+Per species (standing, sign): zebra 87.0% · rhino 69.5% · elephant 58.3% · giraffe 100% (n=10).
+
+### 8.3 Human check — grazing zebras, human face-locks (n = 5,542)
+
+The only reference not derived from our own motion labels, and the only test on *committed* grazers
+(the animals the bridge test cannot reach). Two videos of grazing zebras, hand-annotated, held out of
+training permanently. The face-locks are joined to the boxes **by world direction, not face index**:
+papersubdata carries the raw box rotations while the annotations index the sign-aligned (canonical)
+ones, and **16.9%** of instances differ by a 180° rotation, so an index copy would invert head/tail
+on one instance in six. The world-direction join matches to >0.999 on all 11,084 instances.
+
+| setting | sign | flank* |
+|---|---:|---:|
+| **full method** | **92.5%** | **97.1%** |
+
+By how broadside the animal is:
+
+| \|sin α\| | n | sign | flank |
+|---|---:|---:|---:|
+| 0.00–0.35 (head-on) | 261 | 36.0% | 36.0% |
+| 0.35–0.70 (oblique) | 579 | 86.4% | 86.4% |
+| 0.70–1.00 (broadside) | 4,702 | 96.4% | 98.4% |
+
+On the broadside frames (85% of the set — what re-ID needs) the camera-facing side is named on 98.4%.
+The errors concentrate in the head-on band, where `|sin α|` is small, the body axis barely projects,
+and no flank exists to name.
+
+### 8.4 Ablation (walking set; each row removes one component)
+
+| | sign |
+|---|---:|
+| full method | 87.4% |
+| − centring | 87.3% |
+| − SAM instance mask | 86.6% |
+| − geometric axis prior | 83.6% |
+
+Centring and the geometric axis prior are **redundant with one another**: each solves the *axis*
+problem alone. Under the axis prior the two compared candidates are the two ends of one axis, whose
+profiles are exact reverses; the shared (DC) component is symmetric under that reversal and cancels,
+so centring has nothing left to remove. Centring matters when appearance must choose *between* axes,
+which the axis prior removes.
+
+---
+
+## 9. Not yet done
+
+- **DetAny3D integration.** The detector's `alpha` head (12 bins over 2π, a live loss) is currently
+  fed a hardcoded `0.0` (`data_creator/wildbox.py:270`). Feeding it the recovered heading would let a
+  detector emit heading natively at inference. 3D/BEV AP must not regress against the 5-seed baseline
+  (**3.97 ± 0.65**).
+- **The re-ID payoff.** Gallery accuracy with vs without side-consistent matching — the downstream
+  metric the viewpoint tag exists to serve.
 
 ---
 

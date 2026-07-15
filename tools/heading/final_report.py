@@ -26,29 +26,16 @@ def deg(x):
 
 
 def table(rows, f, meta=None):
-    q = bool(meta and meta.get("ref_quantised"))         # angular error degenerate: show sign+flank
-    if q:
-        f.append("| setting | n | sign | flank\\* |")
-        f.append("|---|---:|---:|---:|")
-        for r in rows:
-            f.append(f"| {r['setting'].strip()} | {r['n']} | {pct(r['sign'])} | "
-                     f"{pct(r['flank_vis'])} |")
-        f.append("")
-        f.append("The reference heading here is itself a box-face azimuth (the annotator's front "
-                 "matched to a box face), so prediction and truth share one quantised candidate "
-                 "set. **Angular error only sees the sign** (0° or ≈180°) and is not reported; "
-                 "**sign** and **flank** are the meaningful columns.")
-        f.append("")
-        return
-    f.append("| setting | n | median err | @15° | @30° | @45° | sign | flank\\* |")
-    f.append("|---|---:|---:|---:|---:|---:|---:|---:|")
+    f.append("| setting | n | sign | flank\\* |")
+    f.append("|---|---:|---:|---:|")
     for r in rows:
-        f.append(f"| {r['setting'].strip()} | {r['n']} | **{deg(r['median_err'])}** | "
-                 f"{pct(r['acc15'])} | {pct(r['acc30'])} | {pct(r['acc45'])} | "
-                 f"{pct(r['sign'])} | {pct(r['flank_vis'])} |")
+        f.append(f"| {r['setting'].strip()} | {r['n']} | **{pct(r['sign'])}** | "
+                 f"{pct(r['flank_vis'])} |")
     f.append("")
-    f.append("\\* flank accuracy is computed **only where a flank is actually visible** "
-             "(|sin α| ≥ 0.35). Elsewhere the animal is head-on and there is no flank to name.")
+    f.append("**Sign** = head vs tail chosen correctly (chance 50%). **Flank\\*** = camera-facing "
+             "side named correctly, over frames where a flank is visible (|sin α| ≥ 0.35). We do "
+             "not report an angular error: the heading is quantised to the box's face normals, so "
+             "the angular error is dominated by the box-axis quality, not by what the method decides.")
     if meta and meta.get("n_abstain"):
         f.append("")
         f.append(f"† The appearance rows report **n = {meta['n_total'] - meta['n_abstain']}** "
@@ -76,11 +63,10 @@ def bands(bs, f):
 def species(ps, f):
     if not ps:
         return
-    f.append("| species | n | median err | sign | flank\\* |")
-    f.append("|---|---:|---:|---:|---:|")
+    f.append("| species | n | sign | flank\\* |")
+    f.append("|---|---:|---:|---:|")
     for s in ps:
-        f.append(f"| {s['species']} | {s['n']} | {deg(s['median_err'])} | {pct(s['sign'])} | "
-                 f"{pct(s['flank_vis'])} |")
+        f.append(f"| {s['species']} | {s['n']} | {pct(s['sign'])} | {pct(s['flank_vis'])} |")
     f.append("")
 
 
@@ -222,11 +208,27 @@ def main() -> int:
              f"track or frame")
     f.append("- the two human-locked zebra videos are excluded from training permanently")
     f.append("")
-    f.append("**The predicted heading is quantised to the 3D box's horizontal face normals** — we "
-             "choose an *end of an axis*, we do not regress a free angle. So the angular error "
-             "contains both our sign/axis decision **and the box's own axis error**. The "
-             "`locomotion only (oracle)` row makes that floor explicit: it is the error obtained "
-             "with a *perfect* sign, and no method built on these boxes can beat it.")
+
+    # ---- METRICS: what each column means ----
+    f.append("## Metrics")
+    f.append("")
+    f.append("The predicted heading is one of four discrete box-axis directions. We evaluate what the "
+             "method decides, not the box axis it inherits.")
+    f.append("")
+    f.append("- **Sign** — of the two directions of the body axis, is the correct **head end** "
+             "chosen? Chance 50%. This is the head-vs-tail decision DINOv3 makes.")
+    f.append("- **Flank\\*** — is the **camera-facing side** (LEFT/RIGHT) named correctly? Computed "
+             "only where a flank is visible (|sin α| ≥ 0.35); elsewhere the animal is head-on and no "
+             "flank exists to name. This is the tag re-ID consumes.")
+    f.append("")
+    f.append("*We do not report an angular (azimuth) error.* Azimuth is the heading, but the azimuth "
+             "**error** does not isolate the method: because the heading is quantised to the box "
+             "faces, a correct prediction inherits the box-axis error and a wrong one is a ~180° "
+             "flip — so acc@45° ≡ sign accuracy. On the human check the reference **is** a box-face "
+             "direction (the annotator labelled which face is the front), so azimuth error can only "
+             "read 0° or 180°. Sign and flank mean the same thing across all three test sets. "
+             "*(Context: the box axes sit a median 9.1° from the motion reference — the ceiling any "
+             "face-selection method inherits.)*")
     f.append("")
 
     # ---- HOW VISIBILITY IS COMPUTED. This is the deliverable; it gets its own section. ----
@@ -279,9 +281,43 @@ def main() -> int:
              "undefined.")
     f.append("")
     f.append("*Verified against the independent construction (`left = up × forward`, "
-             "`forward · to_camera`) over 200 random cameras and headings: exact, 200/200. A sign "
-             "error here would invert every re-ID match while looking entirely plausible, because "
-             "LEFT and RIGHT are equally common.*")
+             "`forward · to_camera`) over 200 random cameras and headings: exact, 200/200.*")
+    f.append("")
+
+    # ---- HOW THE HEAD END IS CHOSEN (the score + the axis mask), verified against the code ----
+    f.append("## How the head end is chosen")
+    f.append("")
+    f.append("The species **template** `T` is a (B, D) matrix: the mean anatomical profile, rump→head "
+             "(B = 5 bins), over the locomotion-labelled training crops. A candidate direction's "
+             "profile `P` is scored against it after removing, from both, the component shared across "
+             "bins — so only the along-body gradient is compared:")
+    f.append("")
+    f.append("```")
+    f.append("P̄   = Σ_b w_b P[b] / Σ_b w_b       weighted mean of P over OCCUPIED bins  (w_b = patch count)")
+    f.append("T̄   = (1/B) Σ_b T[b]               UNweighted mean of T over its B bins")
+    f.append("Tᶜ  = T − T̄ ,   T̂ᶜ = Tᶜ / ‖Tᶜ‖_F   Frobenius norm over ALL bins & channels (one scalar)")
+    f.append("")
+    f.append("S(candidate) = (1/Σ_b w_b) Σ_b w_b ⟨ P[b] − P̄ , T̂ᶜ[b] ⟩")
+    f.append("```")
+    f.append("")
+    f.append("Exactly, from the implementation: **`P̄` is patch-count-weighted** over occupied bins; "
+             "**`T̄` is unweighted** over all bins; the hat is a **single Frobenius normalisation of "
+             "the whole centred template** (not per bin); and the crop profile `P` is **left "
+             "un-normalised** so its magnitude — the along-axis contrast — contributes. The opposite "
+             "candidate's profile is the exact reverse, so four candidates cost two computations.")
+    f.append("")
+    f.append("The heading is then selected with a hard geometric mask, not a finite prior:")
+    f.append("")
+    f.append("```")
+    f.append("ĥ = argmax_candidate [ S(candidate) + G(candidate) ]")
+    f.append("G = 0   on the two directions of the geometrically-proposed axis")
+    f.append("  = −∞  on the other two              (a hard restriction, not a bonus)")
+    f.append("")
+    f.append("proposed axis = argmax_c  d_c · ‖ (I − up upᵀ) R[:,c] ‖")
+    f.append("```")
+    f.append("")
+    f.append("i.e. geometry restricts the search to the two directions of the box's longer "
+             "ground-plane axis, and appearance resolves only the sign between them.")
     f.append("")
 
     # ---- main ----
@@ -328,12 +364,11 @@ def main() -> int:
         s = t["rows"][3]
         f.append("### The gap")
         f.append("")
-        f.append("| | sign | median err | flank\\* |")
-        f.append("|---|---:|---:|---:|")
-        f.append(f"| walking | {pct(w['sign'])} | {deg(w['median_err'])} | {pct(w['flank_vis'])} |")
-        f.append(f"| standing | {pct(s['sign'])} | {deg(s['median_err'])} | {pct(s['flank_vis'])} |")
+        f.append("| | sign | flank\\* |")
+        f.append("|---|---:|---:|")
+        f.append(f"| walking | {pct(w['sign'])} | {pct(w['flank_vis'])} |")
+        f.append(f"| standing | {pct(s['sign'])} | {pct(s['flank_vis'])} |")
         f.append(f"| **difference** | **{100*(s['sign']-w['sign']):+.1f} pts** | "
-                 f"**{s['median_err']-w['median_err']:+.1f}°** | "
                  f"**{100*(s['flank_vis']-w['flank_vis']):+.1f} pts** |")
         f.append("")
         f.append("**[interpretation]** This is the question the whole approach rests on: does "

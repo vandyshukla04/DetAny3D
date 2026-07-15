@@ -69,21 +69,29 @@ obliquity is what makes a flank visible at all.
 
 ## 5. RESULTS (held out by VIDEO; L24/token/224; SAM masks; nothing trained)
 
-| setting | n | med err | @45° | sign | flank* |
-|---|---:|---:|---:|---:|---:|
-| random sign | 5768 | 80.4° | 46.9% | 46.9% | — |
-| **locomotion only (oracle)** | 5768 | **9.1°** | 100% | 100% | — | ← **the FLOOR the boxes impose** |
-| appearance, oracle axis | 5767 | 9.4° | 93.5% | 93.5% | — |
-| **FULL METHOD** | 5767 | **9.8°** | 87.4% | **87.4%** | **95.0%** |
+**Report SIGN + FLANK, not azimuth error.** The heading is quantised to the box's face normals, so
+azimuth error is dominated by box-axis quality (acc@45 ≡ sign) or degenerate (human ref = box face).
+Sign/flank are what the method decides. (Box axes sit 9.1° from motion — the ceiling.)
+
+| setting | n | sign | flank* |
+|---|---:|---:|---:|
+| random sign | 5768 | 46.9% | — |
+| locomotion reference *(= the label)* | 5768 | 100% | — |
+| appearance, oracle axis | 5767 | 93.5% | — |
+| **FULL METHOD** | 5767 | **87.4%** | **95.0%** |
 
 Per species (sign): rhino 91.9 · elephant 77.3 · zebra 73.8 · giraffe 100 (n=30).
-`acc@45 ≡ sign` — the only >45° errors *are* sign flips. **We are 0.7° above the oracle floor.**
 
-**TRANSFER (standing animals):** sign **87.4% → 69.1%** (−18.3), med err 9.8° → 15.2°,
-but **flank 95.0% → 89.4%** (only −5.6). Per species (standing): zebra **87.0%** (*improves*),
-rhino 69.5, elephant **58.3** (*worst*), giraffe 100 (n=10).
+**TRANSFER (standing):** sign **87.4 → 69.1** (−18.3), **flank 95.0 → 89.4** (−5.6). Per species
+(sign): zebra **87.0** (*improves*), rhino 69.5, elephant **58.3** (*worst*), giraffe 100 (n=10).
 
-**ABLATION:** `− centring` 87.3 (**no effect**) · `− SAM mask` 86.6 · `− geometric axis prior` 83.6.
+**HUMAN CHECK (grazing zebras, human face-locks, never trained; only ref not from our labels):**
+sign **92.5%**, flank **97.1%**. By |sin α|: broadside (85%) **96.4 / 98.4**; head-on (4.7%) 36
+(below chance — errors concentrate where no flank exists). Join by WORLD DIRECTION; 16.9% face-index
+flips avoided; matched >0.999 on all 11,084.
+
+**ABLATION (sign):** `− centring` 87.3 (**redundant with the axis prior**) · `− SAM mask` 86.6 ·
+`− geometric axis prior` 83.6.
 
 ## 6. THE THREE OPEN QUESTIONS
 

@@ -81,14 +81,16 @@ def score_all(ex, crops, idx, tmpl, batch, *, centred=True, masks=True):
     return S
 
 
-def metrics(name, az_pred, az_true, sign_ok, flank_ok, visible, n):
-    """One row of the table. The angular error is primary; the rest are diagnostics."""
-    err = np.degrees(np.abs(wrap(az_pred - az_true)))
+def metrics(name, sign_ok, flank_ok, visible, n):
+    """One row of the table. SIGN (head vs tail) and FLANK (the re-ID tag) only.
+
+    We deliberately do NOT report an azimuth/angular error. The heading is quantised to the box's
+    face normals, so the azimuth error is dominated by the BOX AXIS quality, not by what the method
+    contributes -- every error is either ~0 deg (right sign) or ~180 deg (wrong sign), which is why
+    it added nothing over the sign column. Sign and flank are what the method actually decides.
+    """
     return {
         "setting": name, "n": int(n),
-        "median_err": float(np.median(err)),
-        "acc15": float((err <= 15).mean()), "acc30": float((err <= 30).mean()),
-        "acc45": float((err <= 45).mean()),
         "sign": float(np.mean(sign_ok)) if sign_ok is not None else float("nan"),
         "flank_vis": (float(np.mean(flank_ok[visible])) if flank_ok is not None and visible.any()
                       else float("nan")),
@@ -97,23 +99,19 @@ def metrics(name, az_pred, az_true, sign_ok, flank_ok, visible, n):
 
 def show(rows, title):
     print(f"\n=== {title} ===")
-    print(f"{'setting':<26s} {'n':>6s} {'med err':>8s} {'@15':>6s} {'@30':>6s} {'@45':>6s} "
-          f"{'sign':>6s} {'flank*':>7s}")
+    print(f"{'setting':<26s} {'n':>6s} {'sign':>7s} {'flank*':>8s}")
     for r in rows:
-        f = "" if np.isnan(r["flank_vis"]) else f"{100*r['flank_vis']:6.1f}%"
-        s = "" if np.isnan(r["sign"]) else f"{100*r['sign']:5.1f}%"
-        print(f"{r['setting']:<26s} {r['n']:6d} {r['median_err']:7.1f}d "
-              f"{100*r['acc15']:5.1f}% {100*r['acc30']:5.1f}% {100*r['acc45']:5.1f}% "
-              f"{s:>6s} {f:>7s}")
-    print(f"  * flank accuracy is computed only where a flank is actually VISIBLE "
-          f"(|sin alpha| >= {EDGE_ON}); elsewhere the animal is head-on and no flank exists to name.")
+        f = "" if np.isnan(r["flank_vis"]) else f"{100*r['flank_vis']:7.1f}%"
+        s = "" if np.isnan(r["sign"]) else f"{100*r['sign']:6.1f}%"
+        print(f"{r['setting']:<26s} {r['n']:6d} {s:>7s} {f:>8s}")
+    print(f"  * flank accuracy is over frames where a flank is VISIBLE (|sin alpha| >= {EDGE_ON}); "
+          f"elsewhere the animal is head-on and no flank exists to name.")
 
 
 def evaluate(crops, idx, S, d, *, tag):
     """Build every row of the main table from one set of scores."""
     fid, y, geo = d["face_ids"][idx], d["y_face"][idx], d["geo_axis"][idx]
-    faz, falpha = d["face_az"][idx], d["face_alpha"][idx]
-    az_true = d["az"][idx]
+    falpha = d["face_alpha"][idx]
     n = len(idx)
     rng = np.random.default_rng(0)
 
@@ -124,14 +122,10 @@ def evaluate(crops, idx, S, d, *, tag):
 
     # --- 1. RANDOM SIGN: geometry gives the axis, the sign is a coin flip ---
     pick = np.array([ends(k, geo[k])[rng.integers(2)] for k in range(n)])
-    rows.append(metrics("random sign", faz[np.arange(n), pick], az_true,
-                        pick == y, None, np.zeros(n, bool), n))
+    rows.append(metrics("random sign", pick == y, None, np.zeros(n, bool), n))
 
-    # --- 2. LOCOMOTION ONLY: a PERFECT sign. This is the FLOOR the boxes impose. ---
-    # Defined only where motion gives a label -- which is these crops by construction. It is the
-    # error you get with a perfect head/tail decision, so no method on these boxes can beat it.
-    rows.append(metrics("locomotion only (oracle)", faz[np.arange(n), y], az_true,
-                        np.ones(n, bool), None, np.zeros(n, bool), n))
+    # --- 2. LOCOMOTION REFERENCE: sign 100% by construction (this IS the label). ---
+    rows.append(metrics("locomotion reference", np.ones(n, bool), None, np.zeros(n, bool), n))
 
     # --- 3. APPEARANCE, ORACLE AXIS: the axis is given; DINOv3 supplies only the sign ---
     # ABSTENTIONS. score_faces returns NaN when there is genuinely nothing to read -- most often
@@ -152,8 +146,8 @@ def evaluate(crops, idx, S, d, *, tag):
     sv = np.where(np.isnan(S), -np.inf, S)
     t_of = np.array([opposite_slot(fid[k], int(y[k])) for k in range(n)])
     p_or = np.where(sv[np.arange(n), y] >= sv[np.arange(n), t_of], y, t_of)
-    rows.append(metrics("appearance, oracle axis", faz[np.arange(n), p_or][ok], az_true[ok],
-                        (p_or == y)[ok], None, np.zeros(ok.sum(), bool), ok.sum()))
+    rows.append(metrics("appearance, oracle axis", (p_or == y)[ok], None,
+                        np.zeros(ok.sum(), bool), ok.sum()))
 
     # --- 4. FULL METHOD: geometry proposes the axis, appearance disposes the sign ---
     p_full = np.array([choose(S[k], fid[k], axis=int(geo[k]))[0] for k in range(n)])
@@ -163,23 +157,10 @@ def evaluate(crops, idx, S, d, *, tag):
     fl_p = np.array([viewpoint_of(float(a))["flank"] for a in a_p])
     fl_t = np.array([viewpoint_of(float(a))["flank"] for a in a_t])
     vis = np.abs(np.sin(a_t)) >= EDGE_ON
-    rows.append(metrics("FULL METHOD", faz[np.arange(n), np.maximum(p_full, 0)][m], az_true[m],
-                        (p_full == y)[m], (fl_p == fl_t)[m], vis[m], m.sum()))
+    rows.append(metrics("FULL METHOD", (p_full == y)[m], (fl_p == fl_t)[m], vis[m], m.sum()))
 
     # --- 5. + VISIBILITY: the same predictions, read out as the re-ID tag ---
-    rows.append(metrics("FULL + visibility", faz[np.arange(n), np.maximum(p_full, 0)][m],
-                        az_true[m], (p_full == y)[m], (fl_p == fl_t)[m], vis[m], m.sum()))
-
-    # When the reference heading is itself a box-face azimuth (the HUMAN labels: the annotator's
-    # front was matched to a papersubdata face), the prediction and the truth live in the SAME
-    # quantised candidate set. Angular error then only ever sees the sign (0 deg or ~180 deg), and
-    # med/acc@k are degenerate -- only sign and flank are meaningful. Detect and flag it.
-    ref_gap = np.degrees(np.abs(wrap(faz[np.arange(n), y] - az_true)))
-    ref_quantised = bool(np.median(ref_gap) < 1.0)
-    if ref_quantised:
-        print("  NOTE: the reference is quantised to the box axis (median |ref - candidate| "
-              f"{np.median(ref_gap):.2f} deg).\n  Angular columns are degenerate here; read SIGN and "
-              "FLANK only.")
+    rows.append(metrics("FULL + visibility", (p_full == y)[m], (fl_p == fl_t)[m], vis[m], m.sum()))
 
     show(rows, f"MAIN COMPONENT TABLE -- {tag}")
 
@@ -213,16 +194,14 @@ def evaluate(crops, idx, S, d, *, tag):
         q = m & (sp == s)
         if not q.any():
             continue
-        e = np.degrees(np.abs(wrap(faz[np.arange(n), np.maximum(p_full, 0)][q] - az_true[q])))
         fv = q & vis
         fa = float((fl_p == fl_t)[fv].mean()) if fv.any() else float("nan")
-        per_species.append({"species": s, "n": int(q.sum()), "median_err": float(np.median(e)),
+        per_species.append({"species": s, "n": int(q.sum()),
                             "sign": float((p_full == y)[q].mean()), "flank_vis": fa})
-        print(f"    {s:>9s} n={q.sum():5d}  med err {np.median(e):5.1f}d  "
-              f"sign {100*(p_full == y)[q].mean():5.1f}%  flank* {100*fa:5.1f}%")
+        print(f"    {s:>9s} n={q.sum():5d}  sign {100*(p_full == y)[q].mean():5.1f}%  "
+              f"flank* {100*fa:5.1f}%")
     return ({"rows": rows, "bands": band_rows, "per_species": per_species,
-             "n_total": int(n), "n_abstain": n_abstain,
-             "ref_quantised": ref_quantised}, p_full, m)
+             "n_total": int(n), "n_abstain": n_abstain}, p_full, m)
 
 
 def main() -> int:
@@ -318,11 +297,11 @@ def main() -> int:
 
             w = out["main"]["rows"][3]
             s_ = out["transfer"]["rows"][3]
-            print(f"\n  WALKING   sign {100*w['sign']:.1f}%   median err {w['median_err']:.1f} deg")
-            print(f"  STANDING  sign {100*s_['sign']:.1f}%   median err {s_['median_err']:.1f} deg")
+            print(f"\n  WALKING   sign {100*w['sign']:.1f}%   flank {100*w['flank_vis']:.1f}%")
+            print(f"  STANDING  sign {100*s_['sign']:.1f}%   flank {100*s_['flank_vis']:.1f}%")
             print(f"  --------------------------------------------------------------")
-            print(f"  THE GAP   {100*(w['sign']-s_['sign']):+.1f} pts   "
-                  f"{s_['median_err']-w['median_err']:+.1f} deg")
+            print(f"  THE GAP   sign {100*(s_['sign']-w['sign']):+.1f} pts   "
+                  f"flank {100*(s_['flank_vis']-w['flank_vis']):+.1f} pts")
             print(f"\n  This is the number the whole approach rests on. The template was built ONLY")
             print(f"  from walking animals; these are standing ones, on videos it never saw. A small")
             print(f"  gap means DINOv3 carries the locomotion anchor beyond the frames that produced")

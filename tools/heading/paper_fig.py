@@ -47,6 +47,31 @@ from tools.heading.template import Accumulator, choose
 from tools.heading.viewpoint import viewpoint_of
 
 
+def mask_outline(mask: np.ndarray, size: int, thickness: int = 2) -> np.ndarray:
+    """The BOUNDARY of a crop-space mask, as a (size, size) bool -- not the filled mask.
+
+    Drawn white on the crop, it shows WHICH animal is being tracked when the frame contains a herd,
+    without hiding the animal under a colour overlay. Pure numpy: cv2/scipy are not guaranteed in
+    the cluster env.
+
+    boundary = foreground patches that touch a background patch (4-neighbour), then dilated to
+    `thickness` px so the line reads at figure scale.
+    """
+    from PIL import Image
+
+    m = np.asarray(Image.fromarray(mask.astype(np.uint8) * 255).resize((size, size),
+                                                                       Image.NEAREST)) > 127
+    if not m.any():
+        return np.zeros((size, size), bool)
+
+    inner = (m & np.roll(m, 1, 0) & np.roll(m, -1, 0) & np.roll(m, 1, 1) & np.roll(m, -1, 1))
+    edge = m & ~inner                                     # 1-px boundary
+    for _ in range(max(thickness - 1, 0)):               # dilate to `thickness`
+        edge = (edge | np.roll(edge, 1, 0) | np.roll(edge, -1, 0)
+                | np.roll(edge, 1, 1) | np.roll(edge, -1, 1))
+    return edge
+
+
 def track_pca(grids, masks):
     """ONE PCA basis for the whole track, fitted on its foreground patches only.
 
@@ -83,8 +108,11 @@ def main() -> int:
     ap.add_argument("--bins", type=int, default=5)
     ap.add_argument("--batch", type=int, default=96)
     ap.add_argument("--tracks", default=None, help="comma-separated track keys")
-    ap.add_argument("--n-tracks", type=int, default=16,
+    ap.add_argument("--n-tracks", type=int, default=24,
                     help="total animals, balanced across species. One FIGURE each.")
+    ap.add_argument("--outline", type=int, default=2,
+                    help="white SAM-mask boundary thickness (px). 0 = off. Shows WHICH animal is "
+                         "tracked in a herd, without covering it.")
     ap.add_argument("--frames", type=int, default=10, help="frames shown per animal")
     ap.add_argument("--cell", type=int, default=170)
     ap.add_argument("--no-geo-axis", action="store_true")
@@ -202,6 +230,14 @@ def main() -> int:
                           fill=(255, 55, 55), width=4)
             th = uv[it.y_face]
             draw.ellipse([x0 + th[0] - 4, th[1] - 4, x0 + th[0] + 4, th[1] + 4], fill=(40, 255, 90))
+
+            # --- the WHITE SAM boundary: which animal is being tracked, when the frame is a herd ---
+            if it.instance is not None:
+                eb = mask_outline(it.instance, C, thickness=args.outline)
+                if eb.any():
+                    ov = np.zeros((C, C, 4), np.uint8)
+                    ov[eb] = (255, 255, 255, 255)         # outline only; the animal is NOT covered
+                    fig.paste(Image.fromarray(ov, "RGBA"), (x0, 0), Image.fromarray(ov, "RGBA"))
 
             # --- ROW 2: the SAME features, in the SAME colour basis for the whole figure ---
             if project is not None:

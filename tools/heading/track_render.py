@@ -115,10 +115,21 @@ def render_track(tid, frames, cov, seg_dir, out, masked_of):
             continue
         img = Image.open(fp).convert("RGB")
 
-        # ---------- 01: full frame, all boxes, target axis + heading ----------
+        # shared per-frame geometry (the resolved heading is the RESULT -> drawn only in row 03)
+        up = S.up_at(tr, i)
+        cen = tr.centers[i]
+        fcen = face_centers_world(cen, tr.dims[i], tr.rotations[i])
+        L = 0.7 * tr.body_length
+        hd = _face_dir(tr, i, fr["head_face_id"], up)
+        a0, a1 = _project_dir(cam, cen, hd, L)
+
+        # ---------- 01 GEOMETRY: box wireframe + UNSIGNED body axis + 4 candidate faces ----------
+        # The box gives an AXIS, not a direction. This row shows the box, its proposed body axis
+        # (BOLD, both ends, no arrowhead), and the 4 candidate face centres -- and deliberately NO
+        # heading arrow. Appearance + locomotion resolve the signed heading; that is row 03.
         canvas = img.copy()
         dr = ImageDraw.Draw(canvas)
-        for otid, otr in S.tracks.items():                       # every animal, thin grey
+        for otid, otr in S.tracks.items():                       # herd context, dim grey
             try:
                 oi = otr.index_of_frame(fidx)
             except KeyError:
@@ -127,27 +138,23 @@ def render_track(tid, frames, cov, seg_dir, out, masked_of):
             if np.isfinite(cn).all():
                 for a, b in EDGES:
                     dr.line([tuple(cn[a]), tuple(cn[b])], fill=(150, 150, 150), width=2)
-        # the TARGET: bold WHITE wireframe, dark-haloed so it reads on grass or on the animal
+        # the TARGET box: bright MAGENTA wireframe -- shines through the savanna greens/browns
         cn = cam.project(corners_of(tr.centers[i], tr.dims[i], tr.rotations[i]))
         if np.isfinite(cn).all():
             for a, b in EDGES:
-                _hline(dr, cn[a], cn[b], (255, 255, 255), 3)
-        # body axis (geometric axis, through the box) + heading arrow
-        up = S.up_at(tr, i)
-        cen = tr.centers[i]
-        fcen = face_centers_world(cen, tr.dims[i], tr.rotations[i])
+                _hline(dr, cn[a], cn[b], (255, 40, 190), 3, halo=(25, 0, 20))
+        # the 4 CANDIDATE face centres (the box's 4 horizontal faces): white dots
+        for f in _hfaces(tr, i, up):
+            pf = cam.project(fcen[f][None])[0]
+            if np.isfinite(pf).all():
+                dr.ellipse([pf[0] - 6, pf[1] - 6, pf[0] + 6, pf[1] + 6],
+                           fill=(255, 255, 255), outline=(25, 0, 20), width=2)
+        # the PROPOSED body axis: BOLD, UNSIGNED (both ends, no arrowhead), bright yellow
         ga, gb = _axis_ends(tr, i, up)
         pa, pb = cam.project(fcen[ga][None])[0], cam.project(fcen[gb][None])[0]
         if np.isfinite([pa, pb]).all():
-            _hline(dr, pa, pb, (255, 210, 60), 2)          # axis: amber (thin, under the white box)
-        # heading arrow: box centre -> head-face outward direction
-        hd = _face_dir(tr, i, fr["head_face_id"], up)
-        L = 0.7 * tr.body_length
-        a0, a1 = _project_dir(cam, cen, hd, L)
-        if np.isfinite([a0, a1]).all():
-            _arrow(dr, a0[0], a0[1], a1[0], a1[1], (255, 55, 55), 5)               # heading: red, bold
-        dr.text((8, 8), f"{sp}  t={fidx}  {fr['flank']} {fr['flank_w']:.2f} {fr['end'][0]}",
-                fill=(255, 255, 255))
+            _hline(dr, pa, pb, (255, 235, 0), 5, halo=(30, 25, 0))
+        dr.text((8, 8), f"{sp}  t={fidx}", fill=(255, 255, 255))
         canvas.save(out / "01_frame_boxaxis" / f"frame_{fidx:06d}.jpg", quality=92)
 
         # ---------- 03: the target crop + heading + motion reference ----------

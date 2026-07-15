@@ -64,16 +64,26 @@ def _install_numpy2_compat() -> None:
 EDGES = [(0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 6), (6, 7), (7, 4),
          (0, 4), (1, 5), (2, 6), (3, 7)]
 ASPECTS = ("LEFT", "RIGHT", "FACE", "REAR")
-ASPECT_ANGLE = {"FACE": -90, "REAR": 90, "LEFT": 180, "RIGHT": 0}   # compass placement (deg, screen)
 
 
-def _arrow(draw, x0, y0, x1, y1, col, w):
-    draw.line([(x0, y0), (x1, y1)], fill=col, width=w)
-    a = math.atan2(y1 - y0, x1 - x0)
-    L = 0.28 * math.hypot(x1 - x0, y1 - y0)
-    for s in (+1, -1):
-        b = a + s * math.radians(150)
-        draw.line([(x1, y1), (x1 + L * math.cos(b), y1 + L * math.sin(b))], fill=col, width=w)
+def _arrow(draw, x0, y0, x1, y1, col, w, halo=(0, 0, 0)):
+    def stroke(c, ww):
+        draw.line([(x0, y0), (x1, y1)], fill=c, width=ww)
+        a = math.atan2(y1 - y0, x1 - x0)
+        L = 0.28 * math.hypot(x1 - x0, y1 - y0)
+        for s in (+1, -1):
+            b = a + s * math.radians(150)
+            draw.line([(x1, y1), (x1 + L * math.cos(b), y1 + L * math.sin(b))], fill=c, width=ww)
+    if halo is not None:
+        stroke(halo, w + 3)               # dark underlay so the arrow reads on any background
+    stroke(col, w)
+
+
+def _hline(dr, p, q, col, w, halo=(0, 0, 0)):
+    """A line with a dark halo -- a white wireframe stays visible on grass or on the animal."""
+    if halo is not None:
+        dr.line([tuple(p), tuple(q)], fill=halo, width=w + 4)
+    dr.line([tuple(p), tuple(q)], fill=col, width=w)
 
 
 def _project_dir(cam, p0_world, dir_world, length):
@@ -116,12 +126,12 @@ def render_track(tid, frames, cov, seg_dir, out, masked_of):
             cn = cam.project(corners_of(otr.centers[oi], otr.dims[oi], otr.rotations[oi]))
             if np.isfinite(cn).all():
                 for a, b in EDGES:
-                    dr.line([tuple(cn[a]), tuple(cn[b])], fill=(150, 150, 150), width=1)
-        # the TARGET, bold
+                    dr.line([tuple(cn[a]), tuple(cn[b])], fill=(150, 150, 150), width=2)
+        # the TARGET: bold WHITE wireframe, dark-haloed so it reads on grass or on the animal
         cn = cam.project(corners_of(tr.centers[i], tr.dims[i], tr.rotations[i]))
         if np.isfinite(cn).all():
             for a, b in EDGES:
-                dr.line([tuple(cn[a]), tuple(cn[b])], fill=(90, 200, 255), width=3)
+                _hline(dr, cn[a], cn[b], (255, 255, 255), 3)
         # body axis (geometric axis, through the box) + heading arrow
         up = S.up_at(tr, i)
         cen = tr.centers[i]
@@ -129,13 +139,13 @@ def render_track(tid, frames, cov, seg_dir, out, masked_of):
         ga, gb = _axis_ends(tr, i, up)
         pa, pb = cam.project(fcen[ga][None])[0], cam.project(fcen[gb][None])[0]
         if np.isfinite([pa, pb]).all():
-            dr.line([tuple(pa), tuple(pb)], fill=(255, 210, 60), width=3)          # axis: amber
+            _hline(dr, pa, pb, (255, 210, 60), 2)          # axis: amber (thin, under the white box)
         # heading arrow: box centre -> head-face outward direction
         hd = _face_dir(tr, i, fr["head_face_id"], up)
         L = 0.7 * tr.body_length
         a0, a1 = _project_dir(cam, cen, hd, L)
         if np.isfinite([a0, a1]).all():
-            _arrow(dr, a0[0], a0[1], a1[0], a1[1], (255, 55, 55), 4)               # heading: red
+            _arrow(dr, a0[0], a0[1], a1[0], a1[1], (255, 55, 55), 5)               # heading: red, bold
         dr.text((8, 8), f"{sp}  t={fidx}  {fr['flank']} {fr['flank_w']:.2f} {fr['end'][0]}",
                 fill=(255, 255, 255))
         canvas.save(out / "01_frame_boxaxis" / f"frame_{fidx:06d}.jpg", quality=92)
@@ -169,7 +179,7 @@ def render_track(tid, frames, cov, seg_dir, out, masked_of):
             out / "02_dino_pca" / f"frame_{fidx:06d}.png")
 
     # ---------- 04: coverage cards + masked exemplars ----------
-    _coverage(out / "04_coverage", cov, masked_of)
+    _coverage(out / "04_coverage", cov, [fr["alpha"] for fr in frames], masked_of)
     (out / "info.json").write_text(json.dumps({
         "species": sp, "video": frames[0]["video"], "seg": frames[0]["seg"],
         "track": frames[0]["track_id"],
@@ -179,31 +189,52 @@ def render_track(tid, frames, cov, seg_dir, out, masked_of):
     }, indent=1))
 
 
-def _coverage(cdir, cov, masked_of):
+def _coverage(cdir, cov, alphas, masked_of):
     from PIL import Image, ImageDraw
 
     duty, exemplar = cov["duty"], cov["exemplar"]
 
-    # --- the WHEEL: 4 sectors, shaded by duty; missing = hollow ---
-    W = 300
-    wheel = Image.new("RGB", (W, W), (18, 18, 22))
-    dw = ImageDraw.Draw(wheel)
-    cx = cy = W // 2
-    R = 0.42 * W
-    for asp in ASPECTS:
-        a0 = ASPECT_ANGLE[asp] - 45
-        du = duty[asp]
-        col = (int(40 + 120 * du), int(120 + 110 * du), int(150 + 90 * du))
-        if du > 0.02:
-            dw.pieslice([cx - R, cy - R, cx + R, cy + R], a0, a0 + 90, fill=col)
-        dw.pieslice([cx - R, cy - R, cx + R, cy + R], a0, a0 + 90, outline=(90, 90, 100))
-        am = math.radians(a0 + 45)
-        label = f"{asp}\n{100*du:.0f}%" if du > 0.02 else asp
-        tx = cx + 0.62 * R * math.cos(am) - 3 * len(asp)      # ~6px/char, centre the word
-        dw.text((tx, cy + 0.62 * R * math.sin(am) - 6), label,
-                fill=(240, 240, 245) if du > 0.02 else (110, 110, 120))
-    dw.ellipse([cx - 5, cy - 5, cx + 5, cy + 5], fill=(240, 240, 245))    # the animal
-    wheel.save(cdir / "wheel.png")
+    # --- the RADAR: a top-down animal (drawn HEAD-UP) with one dot per frame at the angle the
+    #     CAMERA observed it from. alpha = the animal's heading vs the viewing ray, so alpha=pi is
+    #     face-on (camera in front -> dot at top), alpha=0 is tail-on (dot at bottom), +pi/2 is the
+    #     LEFT flank (dot at left). Reads directly as "the drone saw this animal mostly from ...". ---
+    W, CAP = 320, 26
+    radar = Image.new("RGB", (W, W + CAP), (18, 18, 22))
+    dw = ImageDraw.Draw(radar)
+    cx, cy = W // 2, W // 2
+    R = 0.40 * W
+    r_ring = 0.80 * R
+    dw.ellipse([cx - R, cy - R, cx + R, cy + R], outline=(70, 70, 82), width=2)
+    # head-on / tail-on DEAD ZONES (|sin alpha| < 0.35): no usable flank exists there
+    th = math.degrees(math.asin(0.35))
+    for centre in (90, 270):                              # 90 = tail-on (bottom), 270 = face-on (top)
+        dw.arc([cx - r_ring, cy - r_ring, cx + r_ring, cy + r_ring],
+               centre - th, centre + th, fill=(74, 50, 50), width=16)
+    for asp, (lx, ly) in {"FACE": (cx - 13, cy - R + 2), "REAR": (cx - 13, cy + R - 12),
+                          "LEFT": (cx - R + 3, cy - 6), "RIGHT": (cx + R - 33, cy - 6)}.items():
+        dw.text((lx, ly), asp, fill=(205, 205, 215))
+    # the animal, top-down, HEAD UP -> the direction it FACES points to the FACE label
+    bw, bt, bb = 0.055 * W, cy - 0.11 * W, cy + 0.13 * W
+    dw.ellipse([cx - bw, bt, cx + bw, bb], fill=(120, 120, 132))                   # body
+    dw.polygon([(cx, cy - 0.17 * W), (cx - 0.05 * W, bt + 4), (cx + 0.05 * W, bt + 4)],
+               fill=(150, 150, 162))                                              # head (points up)
+    # one dot per frame: WHERE THE CAMERA WAS relative to the animal
+    for k, a in enumerate(alphas):
+        sr = a + math.pi / 2
+        rr = r_ring - (k % 3) * 7                         # de-overlap repeated viewpoints
+        x, y = cx + rr * math.cos(sr), cy + rr * math.sin(sr)
+        usable = abs(math.sin(a)) >= 0.35                 # broadside enough for a flank tag
+        col = (90, 220, 255) if usable else (225, 175, 70)
+        dw.ellipse([x - 5, y - 5, x + 5, y + 5], fill=col, outline=(15, 15, 18))
+    # caption: the re-ID-relevant conclusion (which flanks this track actually shows)
+    seenL = any(math.sin(a) >= 0.35 for a in alphas)
+    seenR = any(math.sin(a) <= -0.35 for a in alphas)
+    cap = ("both flanks seen" if seenL and seenR else
+           "LEFT flank only  (RIGHT missing)" if seenL else
+           "RIGHT flank only  (LEFT missing)" if seenR else
+           "no broadside flank (head/tail-on)")
+    dw.text((8, W + 6), cap, fill=(200, 220, 235))
+    radar.save(cdir / "wheel.png")
 
     # --- the BARS: one per aspect, width proportional to duty ---
     BW, BH = 320, 150

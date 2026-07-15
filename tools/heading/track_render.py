@@ -24,6 +24,7 @@ import argparse
 import io
 import json
 import math
+import sys
 from collections import defaultdict
 from pathlib import Path
 
@@ -31,6 +32,33 @@ import numpy as np
 
 from tools.heading.conventions import corners_of, face_centers_world
 from tools.heading.papersub import load_segment
+
+
+def _install_numpy2_compat() -> None:
+    """Let a numpy<2 reader open object arrays pickled by numpy>=2.0.
+
+    numpy 2.0 renamed its private `numpy.core` package to `numpy._core`, so the object-dtype
+    members of the bundle (`coverage`, `masked`) name a module that numpy 1.x does not have --
+    the error is `ModuleNotFoundError: No module named 'numpy._core'` at ACCESS time, not load
+    time. The cluster (numpy>=2.0) writes the npz; this local box (numpy 1.x) reads it.
+
+    We ALIAS the already-loaded `numpy.core.*` module objects into the `numpy._core.*` names the
+    pickle asks for. This points the two names at the SAME loaded objects -- crucially it never
+    re-imports numpy's C extensions (re-initialising `_multiarray_umath` under a second name
+    segfaults). A no-op on numpy>=2.0 (the real `numpy._core` is already present) and on 1.x when
+    no such pickle is ever touched.
+    """
+    if "numpy._core" in sys.modules:
+        return                                            # numpy>=2.0, or already aliased
+    if not np.__version__.startswith("1."):
+        return                                            # only 1.x lacks numpy._core
+    # make sure the submodules an object-array pickle names (_reconstruct lives in multiarray) are
+    # loaded, then mirror the whole numpy.core subtree onto numpy._core with the same objects.
+    import numpy.core.multiarray  # noqa: F401
+    import numpy.core.numeric     # noqa: F401
+    for name, mod in list(sys.modules.items()):
+        if name == "numpy.core" or name.startswith("numpy.core."):
+            sys.modules.setdefault("numpy._core" + name[len("numpy.core"):], mod)
 
 # 12 edges of the box, in CORNERS_LOCAL_UNIT order (bottom loop, top loop, 4 verticals)
 EDGES = [(0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 6), (6, 7), (7, 4),
@@ -251,6 +279,7 @@ def main() -> int:
     ap.add_argument("--out", type=Path, required=True)
     args = ap.parse_args()
 
+    _install_numpy2_compat()          # bundle may be written by a newer numpy than the local one
     E = np.load(args.export, allow_pickle=True)
     cover = json.loads(str(E["coverage"][0]))
     masked = E["masked"]

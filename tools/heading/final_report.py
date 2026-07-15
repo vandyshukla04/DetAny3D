@@ -26,6 +26,20 @@ def deg(x):
 
 
 def table(rows, f, meta=None):
+    q = bool(meta and meta.get("ref_quantised"))         # angular error degenerate: show sign+flank
+    if q:
+        f.append("| setting | n | sign | flank\\* |")
+        f.append("|---|---:|---:|---:|")
+        for r in rows:
+            f.append(f"| {r['setting'].strip()} | {r['n']} | {pct(r['sign'])} | "
+                     f"{pct(r['flank_vis'])} |")
+        f.append("")
+        f.append("The reference heading here is itself a box-face azimuth (the annotator's front "
+                 "matched to a box face), so prediction and truth share one quantised candidate "
+                 "set. **Angular error only sees the sign** (0° or ≈180°) and is not reported; "
+                 "**sign** and **flank** are the meaningful columns.")
+        f.append("")
+        return
     f.append("| setting | n | median err | @15° | @30° | @45° | sign | flank\\* |")
     f.append("|---|---:|---:|---:|---:|---:|---:|---:|")
     for r in rows:

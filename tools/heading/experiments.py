@@ -170,6 +170,17 @@ def evaluate(crops, idx, S, d, *, tag):
     rows.append(metrics("FULL + visibility", faz[np.arange(n), np.maximum(p_full, 0)][m],
                         az_true[m], (p_full == y)[m], (fl_p == fl_t)[m], vis[m], m.sum()))
 
+    # When the reference heading is itself a box-face azimuth (the HUMAN labels: the annotator's
+    # front was matched to a papersubdata face), the prediction and the truth live in the SAME
+    # quantised candidate set. Angular error then only ever sees the sign (0 deg or ~180 deg), and
+    # med/acc@k are degenerate -- only sign and flank are meaningful. Detect and flag it.
+    ref_gap = np.degrees(np.abs(wrap(faz[np.arange(n), y] - az_true)))
+    ref_quantised = bool(np.median(ref_gap) < 1.0)
+    if ref_quantised:
+        print("  NOTE: the reference is quantised to the box axis (median |ref - candidate| "
+              f"{np.median(ref_gap):.2f} deg).\n  Angular columns are degenerate here; read SIGN and "
+              "FLANK only.")
+
     show(rows, f"MAIN COMPONENT TABLE -- {tag}")
 
     # ---- WHERE DO THE SIGN ERRORS LIVE?  The decisive diagnostic. ----
@@ -210,7 +221,8 @@ def evaluate(crops, idx, S, d, *, tag):
         print(f"    {s:>9s} n={q.sum():5d}  med err {np.median(e):5.1f}d  "
               f"sign {100*(p_full == y)[q].mean():5.1f}%  flank* {100*fa:5.1f}%")
     return ({"rows": rows, "bands": band_rows, "per_species": per_species,
-             "n_total": int(n), "n_abstain": n_abstain}, p_full, m)
+             "n_total": int(n), "n_abstain": n_abstain,
+             "ref_quantised": ref_quantised}, p_full, m)
 
 
 def main() -> int:

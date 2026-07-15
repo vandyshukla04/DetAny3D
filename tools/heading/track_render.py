@@ -1,0 +1,305 @@
+"""STAGE 2 (LOCAL, CPU): render per-track figure ELEMENTS into numbered folders.  [/mnt/d papersubdata]
+
+    python -m tools.heading.track_render --export data/heading/track_export.npz \
+        --root /mnt/d/3DBOX/papersubdata --out /mnt/d/detany3d/track_figs
+
+Reads the cluster bundle (predictions + DINOv3 PCA + SAM masked crops) and the full-resolution
+papersubdata (frames, all-track 3D boxes, cameras), and writes, PER TRACK, every element as a
+SEPARATE file so they can be arranged freely:
+
+    track_NN_<species>_<video>_<trackid>/
+      01_frame_boxaxis/ frame_XXXXXX.jpg   full frame; ALL animals' 3D boxes (grey), the target's
+                                           box bold + body axis + red heading arrow + tag.  1/frame.
+      02_dino_pca/      frame_XXXXXX.png    DINOv3 PCA-RGB, one basis for the track.        1/frame.
+      03_heading/       frame_XXXXXX.jpg    the target crop + heading arrow + motion reference (grey)
+                                           + viewpoint weights.                            1/frame.
+      04_coverage/      wheel.png  bars.png                    the two coverage cards
+                        view_LEFT.jpg view_RIGHT.jpg view_FACE.jpg view_REAR.jpg   masked exemplars
+                                                                    (or a MISSING placeholder)
+      info.json                            species, video, track, per-frame tags, coverage
+"""
+from __future__ import annotations
+
+import argparse
+import io
+import json
+import math
+from collections import defaultdict
+from pathlib import Path
+
+import numpy as np
+
+from tools.heading.conventions import corners_of, face_centers_world
+from tools.heading.papersub import load_segment
+
+# 12 edges of the box, in CORNERS_LOCAL_UNIT order (bottom loop, top loop, 4 verticals)
+EDGES = [(0, 1), (1, 2), (2, 3), (3, 0), (4, 5), (5, 6), (6, 7), (7, 4),
+         (0, 4), (1, 5), (2, 6), (3, 7)]
+ASPECTS = ("LEFT", "RIGHT", "FACE", "REAR")
+ASPECT_ANGLE = {"FACE": -90, "REAR": 90, "LEFT": 180, "RIGHT": 0}   # compass placement (deg, screen)
+
+
+def _arrow(draw, x0, y0, x1, y1, col, w):
+    draw.line([(x0, y0), (x1, y1)], fill=col, width=w)
+    a = math.atan2(y1 - y0, x1 - x0)
+    L = 0.28 * math.hypot(x1 - x0, y1 - y0)
+    for s in (+1, -1):
+        b = a + s * math.radians(150)
+        draw.line([(x1, y1), (x1 + L * math.cos(b), y1 + L * math.sin(b))], fill=col, width=w)
+
+
+def _project_dir(cam, p0_world, dir_world, length):
+    """(box centre, world direction) -> two full-res pixels along `dir` of `length` (world units)."""
+    a = cam.project(p0_world[None])[0]
+    b = cam.project((p0_world + length * dir_world)[None])[0]
+    return a, b
+
+
+def render_track(tid, frames, cov, seg_dir, out, masked_of):
+    """frames: list of per-frame dicts (already sorted). cov: coverage dict for this track."""
+    from PIL import Image, ImageDraw
+
+    sp = frames[0]["species"]
+    S = load_segment(seg_dir)
+    tr = S.tracks[str(frames[0]["track_id"])]
+
+    (out / "01_frame_boxaxis").mkdir(parents=True, exist_ok=True)
+    (out / "02_dino_pca").mkdir(parents=True, exist_ok=True)
+    (out / "03_heading").mkdir(parents=True, exist_ok=True)
+    (out / "04_coverage").mkdir(parents=True, exist_ok=True)
+
+    for fr in frames:
+        fidx = fr["frame"]
+        cam = S.cameras[fidx]
+        i = tr.index_of_frame(fidx)
+        fp = S.frame_path(fidx)
+        if not fp.is_file():
+            continue
+        img = Image.open(fp).convert("RGB")
+
+        # ---------- 01: full frame, all boxes, target axis + heading ----------
+        canvas = img.copy()
+        dr = ImageDraw.Draw(canvas)
+        for otid, otr in S.tracks.items():                       # every animal, thin grey
+            try:
+                oi = otr.index_of_frame(fidx)
+            except KeyError:
+                continue
+            cn = cam.project(corners_of(otr.centers[oi], otr.dims[oi], otr.rotations[oi]))
+            if np.isfinite(cn).all():
+                for a, b in EDGES:
+                    dr.line([tuple(cn[a]), tuple(cn[b])], fill=(150, 150, 150), width=1)
+        # the TARGET, bold
+        cn = cam.project(corners_of(tr.centers[i], tr.dims[i], tr.rotations[i]))
+        if np.isfinite(cn).all():
+            for a, b in EDGES:
+                dr.line([tuple(cn[a]), tuple(cn[b])], fill=(90, 200, 255), width=3)
+        # body axis (geometric axis, through the box) + heading arrow
+        up = S.up_at(tr, i)
+        cen = tr.centers[i]
+        fcen = face_centers_world(cen, tr.dims[i], tr.rotations[i])
+        ga, gb = _axis_ends(tr, i, up)
+        pa, pb = cam.project(fcen[ga][None])[0], cam.project(fcen[gb][None])[0]
+        if np.isfinite([pa, pb]).all():
+            dr.line([tuple(pa), tuple(pb)], fill=(255, 210, 60), width=3)          # axis: amber
+        # heading arrow: box centre -> head-face outward direction
+        hd = _face_dir(tr, i, fr["head_face_id"], up)
+        L = 0.7 * tr.body_length
+        a0, a1 = _project_dir(cam, cen, hd, L)
+        if np.isfinite([a0, a1]).all():
+            _arrow(dr, a0[0], a0[1], a1[0], a1[1], (255, 55, 55), 4)               # heading: red
+        dr.text((8, 8), f"{sp}  t={fidx}  {fr['flank']} {fr['flank_w']:.2f} {fr['end'][0]}",
+                fill=(255, 255, 255))
+        canvas.save(out / "01_frame_boxaxis" / f"frame_{fidx:06d}.jpg", quality=92)
+
+        # ---------- 03: the target crop + heading + motion reference ----------
+        box = S.crop_box(tr, i)
+        ox, oy, side = _crop_transform(box, 0.15)
+        crop = _square_crop(np.asarray(img), box, 0.15)
+        if crop is not None:
+            cc = Image.fromarray(crop)
+            dc = ImageDraw.Draw(cc)
+            def to_crop(px):
+                return ((px[0] - ox) / side * cc.width, (px[1] - oy) / side * cc.height)
+            # motion reference (grey) — the walking direction
+            e1, e2, _ = S.ground_basis
+            md = math.cos(fr["az"]) * e1 + math.sin(fr["az"]) * e2
+            m0, m1 = _project_dir(cam, cen, md, L)
+            if np.isfinite([m0, m1]).all():
+                _arrow(dc, *to_crop(m0), *to_crop(m1), (170, 170, 170), 4)
+            # resolved heading (red)
+            if np.isfinite([a0, a1]).all():
+                _arrow(dc, *to_crop(a0), *to_crop(a1), (255, 55, 55), 4)
+            dc.text((5, cc.height - 16),
+                    f"{fr['flank']} {fr['flank_w']:.2f}  {fr['end']} {fr['end_w']:.2f}",
+                    fill=(90, 235, 255) if fr["flank_w"] >= 0.35 else (225, 175, 70))
+            cc.save(out / "03_heading" / f"frame_{fidx:06d}.jpg", quality=92)
+
+        # ---------- 02: DINOv3 PCA (from the cluster bundle) ----------
+        pca = fr["pca"]
+        Image.fromarray(pca).resize((side_px := 220, side_px), Image.NEAREST).save(
+            out / "02_dino_pca" / f"frame_{fidx:06d}.png")
+
+    # ---------- 04: coverage cards + masked exemplars ----------
+    _coverage(out / "04_coverage", cov, masked_of)
+    (out / "info.json").write_text(json.dumps({
+        "species": sp, "video": frames[0]["video"], "seg": frames[0]["seg"],
+        "track": frames[0]["track_id"],
+        "n_frames": len(frames), "coverage": cov,
+        "frames": [{k: fr[k] for k in ("frame", "flank", "flank_w", "end", "end_w",
+                                       "head_face_id", "margin")} for fr in frames],
+    }, indent=1))
+
+
+def _coverage(cdir, cov, masked_of):
+    from PIL import Image, ImageDraw
+
+    duty, exemplar = cov["duty"], cov["exemplar"]
+
+    # --- the WHEEL: 4 sectors, shaded by duty; missing = hollow ---
+    W = 300
+    wheel = Image.new("RGB", (W, W), (18, 18, 22))
+    dw = ImageDraw.Draw(wheel)
+    cx = cy = W // 2
+    R = 0.42 * W
+    for asp in ASPECTS:
+        a0 = ASPECT_ANGLE[asp] - 45
+        du = duty[asp]
+        col = (int(40 + 120 * du), int(120 + 110 * du), int(150 + 90 * du))
+        if du > 0.02:
+            dw.pieslice([cx - R, cy - R, cx + R, cy + R], a0, a0 + 90, fill=col)
+        dw.pieslice([cx - R, cy - R, cx + R, cy + R], a0, a0 + 90, outline=(90, 90, 100))
+        am = math.radians(a0 + 45)
+        label = f"{asp}\n{100*du:.0f}%" if du > 0.02 else asp
+        tx = cx + 0.62 * R * math.cos(am) - 3 * len(asp)      # ~6px/char, centre the word
+        dw.text((tx, cy + 0.62 * R * math.sin(am) - 6), label,
+                fill=(240, 240, 245) if du > 0.02 else (110, 110, 120))
+    dw.ellipse([cx - 5, cy - 5, cx + 5, cy + 5], fill=(240, 240, 245))    # the animal
+    wheel.save(cdir / "wheel.png")
+
+    # --- the BARS: one per aspect, width proportional to duty ---
+    BW, BH = 320, 150
+    bars = Image.new("RGB", (BW, BH), (18, 18, 22))
+    db = ImageDraw.Draw(bars)
+    for k, asp in enumerate(ASPECTS):
+        y = 10 + k * 34
+        du = duty[asp]
+        db.rectangle([90, y, 90 + int((BW - 110) * du), y + 22],
+                     fill=(90, 200, 235) if du > 0 else (60, 60, 66))
+        db.text((6, y + 4), asp, fill=(230, 230, 235))
+        db.text((BW - 40, y + 4), f"{100*du:.0f}%",
+                fill=(230, 230, 235) if du > 0 else (120, 120, 130))
+    bars.save(cdir / "bars.png")
+
+    # --- masked exemplar per aspect (or MISSING placeholder) ---
+    for asp in ASPECTS:
+        gi = exemplar[asp]
+        if gi is not None and gi >= 0 and masked_of(gi) is not None:
+            Image.open(io.BytesIO(masked_of(gi))).save(cdir / f"view_{asp}.jpg", quality=92)
+        else:
+            ph = Image.new("RGB", (160, 160), (30, 30, 36))
+            ImageDraw.Draw(ph).text((30, 72), f"{asp}\nMISSING", fill=(200, 120, 120))
+            ph.save(cdir / f"view_{asp}.jpg", quality=92)
+
+
+# ---- small geometry helpers (all full-res, from papersubdata) ----
+def _axis_ends(tr, i, up):
+    from tools.heading.conventions import FACE_AXIS
+    ext = {}
+    for f in _hfaces(tr, i, up):
+        c = FACE_AXIS[f]
+        a = tr.rotations[i][:, c] - np.dot(tr.rotations[i][:, c], up) * up
+        ext[f] = float(tr.dims[i][c] * np.linalg.norm(a))
+    from tools.heading.conventions import OPPOSITE_FACE
+    g = max(ext, key=ext.get)
+    return g, OPPOSITE_FACE[g]
+
+
+def _hfaces(tr, i, up):
+    from tools.heading.frame import horizontal_faces
+    return horizontal_faces(tr.rotations[i], up)
+
+
+def _face_dir(tr, i, face_id, up):
+    from tools.heading.conventions import face_normals_world
+    d = face_normals_world(tr.rotations[i])[int(face_id)]
+    d = d - np.dot(d, up) * up
+    n = np.linalg.norm(d)
+    return d / n if n > 1e-9 else d
+
+
+def _crop_transform(box, pad):
+    from tools.heading.extract_crops import crop_transform
+    return crop_transform(box, pad)
+
+
+def _square_crop(img, box, pad):
+    from tools.heading.extract_crops import square_crop
+    return square_crop(img, box, pad)
+
+
+def _group(species):
+    # the local render only needs the group PREFIX; the segment path is resolved by globbing
+    return {"elephant": "elep", "rhino": "rhin", "zebra": "zebr", "giraffe": "gira"}[species]
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__,
+                                 formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("--export", type=Path, required=True, help="track_export.npz from the cluster")
+    ap.add_argument("--root", type=Path, default=Path("/mnt/d/3DBOX/papersubdata"))
+    ap.add_argument("--out", type=Path, required=True)
+    args = ap.parse_args()
+
+    E = np.load(args.export, allow_pickle=True)
+    cover = json.loads(str(E["coverage"][0]))
+    masked = E["masked"]
+    def masked_of(gi):
+        b = masked[gi]
+        return b.tobytes() if isinstance(b, np.ndarray) else b
+
+    # group flat records by track, preserving order (already time-sorted in the export)
+    by_track = defaultdict(list)
+    for gi in range(len(E["track"])):
+        by_track[str(E["track"][gi])].append(gi)
+
+    # resolve seg directories by GLOB (species-group prefix + video + seg)
+    for k in cover:
+        cover[k]["exemplar"] = {a: int(v) for a, v in cover[k]["exemplar"].items()}
+
+    args.out.mkdir(parents=True, exist_ok=True)
+    for ti, (tid, gis) in enumerate(sorted(by_track.items()), 1):
+        frames = []
+        for gi in gis:
+            frames.append({
+                "track_id": tid.split("::")[-1],
+                "species": str(E["species"][gi]) if "species" in E else cover[tid]["species"],
+                "video": str(E["video"][gi]), "seg": str(E["seg"][gi]),
+                "frame": int(E["frame"][gi]), "image_name": str(E["image_name"][gi]),
+                "head_face_id": int(E["head_face_id"][gi]), "alpha": float(E["alpha"][gi]),
+                "flank": str(E["flank"][gi]), "flank_w": float(E["flank_w"][gi]),
+                "end": str(E["end"][gi]), "end_w": float(E["end_w"][gi]),
+                "margin": float(E["margin"][gi]), "az": float(E["az"][gi]),
+                "pca": E["pca"][gi],
+            })
+        sp, vid = cover[tid]["species"], cover[tid]["video"]
+        folder = args.out / f"track_{ti:02d}_{sp}_{vid}_{tid.split('::')[-1]}"
+        # resolve the seg dir robustly (group prefix may map to elep1/elep2/...)
+        seg = frames[0]["seg"]
+        matches = sorted(args.root.glob(f"{_group(sp)}*/{vid}/{seg}"))
+        if not matches:
+            print(f"  [{ti}] SKIP {tid}: no papersubdata dir for {_group(sp)}*/{vid}/{seg}")
+            continue
+        try:
+            render_track(tid, frames, cover[tid], matches[0], folder, masked_of)
+            print(f"  [{ti}] {folder.name}: {len(frames)} frames", flush=True)
+        except Exception as e:                            # keep going; one bad track is not fatal
+            print(f"  [{ti}] ERROR {tid}: {e}")
+
+    print(f"\nwrote {len(by_track)} track folders -> {args.out}/")
+    print("  each element is a separate file; arrange them however you like.")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

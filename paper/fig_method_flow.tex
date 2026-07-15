@@ -1,0 +1,103 @@
+% ============================================================================
+% Main METHOD figure -- LINEAR HORIZONTAL pipeline with real imagery (ECCV style).
+% ----------------------------------------------------------------------------
+% Preamble needs:
+%   \usepackage{graphicx,tikz}
+%   \usetikzlibrary{arrows.meta,positioning,fit,backgrounds,calc}
+%
+% LAYOUT
+%   * ONE shared frozen DINOv3, raised to the VERTICAL CENTRE -- both lanes feed it (offline from
+%     the top, inference from the bottom), so it visibly serves both without a "shared" caption.
+%   * TOP lane (offline, dashed): walking crops -> DINOv3 -> per-species template T (4 real strips).
+%   * BOTTOM lane (inference): Input -> Geometry -> [up to DINOv3, back down] -> Fuse -> Heading -> Tag,
+%     with generous horizontal spacing.
+%   * A clear VERTICAL BAND is left between the two lanes -- drop real example images (a filmstrip)
+%     there when assembling the final figure (see the marked band below).
+%
+% Positions are in cm; tune freely. Every \includegraphics is a PLACEHOLDER -> export panels to ./figs/.
+% Colours reuse the renderer: magenta=3D box, yellow=body axis, white=candidate faces,
+% red=resolved heading, grey=motion reference, cyan/amber=radar dots.
+% ============================================================================
+\begin{figure*}[t]
+\centering
+\begin{tikzpicture}[
+  font=\small,
+  >={Latex[length=2mm]},
+  img/.style ={inner sep=0, outer sep=0, draw=black!55, line width=0.3pt},
+  blk/.style ={draw, rounded corners=2pt, align=center, inner sep=4pt},
+  cap/.style ={align=center, font=\scriptsize, text width=26mm},
+  ar/.style  ={->, thick, black!55},
+  al/.style  ={midway, font=\scriptsize\itshape, fill=white, inner sep=1pt},
+]
+
+% ================= SHARED FROZEN DINOv3 (vertical centre; the hub of both lanes) =================
+\node[blk, fill=blue!6, minimum width=24mm, minimum height=11mm] (dino) at (6.2,2.7)
+     {\textbf{Frozen DINOv3}\\[-1pt]{\scriptsize dense patch features}};
+
+% ================= BOTTOM lane: INFERENCE (y=0), generous horizontal spacing =================
+\node[img] (p1) at (0.0,0) {\includegraphics[width=26mm]{figs/p1_input.jpg}};      % 01 cropped to target + 1 herd-mate
+\node[img] (p2) at (3.7,0) {\includegraphics[width=22mm]{figs/p2_geometry.jpg}};    % 01 tight crop: magenta box + yellow axis + 4 white dots
+\node[blk, minimum width=24mm, minimum height=13mm] (p4) at (9.0,0)
+     {geometry \emph{proposes}\\ the axis\\[2pt] appearance \emph{resolves}\\ the sign};
+\node[img] (p5) at (12.3,0) {\includegraphics[width=22mm]{figs/p5_heading.jpg}};    % 03 crop: red heading + grey motion + weights
+\node[img] (p6) at (15.4,0) {\includegraphics[width=24mm]{figs/p6_radar.png}};      % 04 radar (wheel.png)
+
+% ================= TOP lane: OFFLINE template construction =================
+\node[img] (walk) at (3.4,5.4) {\includegraphics[width=24mm]{figs/offline_walk.jpg}};  % a WALKING crop, grey motion arrow -> head known for free
+% --- the template block: 4 per-species rump->head strips (fills the box; shows "one per species") ---
+\node[blk, minimum width=30mm, minimum height=18mm] (tmpl) at (9.6,5.4) {};
+\node[font=\scriptsize, anchor=north, align=center] at ([yshift=-1mm]tmpl.north)
+     {\textbf{Template $\mathbf{T}$}\\[-1pt]{\tiny one per species $\cdot$ rump$\to$head}};
+% explicit y-offsets (no inline \foreach arithmetic -- TikZ parses these reliably)
+\foreach \sy in {-0.5mm, -2.7mm, -4.9mm, -7.1mm} {
+  \shade[left color=gray!75, right color=orange!85, draw=black!30, line width=0.2pt]
+        ([shift={(-11mm,\sy)}]tmpl.center) rectangle ++(22mm,1.7mm);
+}
+\node[font=\tiny, text=black!55, anchor=north west] at ([shift={(-11mm,-7.6mm)}]tmpl.center) {eleph.\,/\,zebra\,/\,rhino\,/\,giraffe};
+
+% ================= FLOW =================
+% bottom (inference) lane, up through the shared hub and back down
+\draw[ar] (p1) -- (p2)   node[al]{3D box};
+\draw[ar] (p2.north) -- (dino.south west) node[al, near end]{target crop};
+\draw[ar] (dino.south east) -- (p4.north) node[al, near start]{profile};
+\draw[ar] (p4) -- (p5)   node[al]{sign $\to\hat{\mathbf h}$};
+\draw[ar] (p5) -- (p6)   node[al]{$\alpha$};
+% top (offline) lane -- the SAME DINOv3
+\draw[ar] (walk.south) -- (dino.north west) node[al, near end]{training crops};
+\draw[ar] (dino.north east) -- (tmpl.south) node[al, near start]{mean / species};
+\draw[ar] (tmpl) -- (p4.north east) node[al, near start]{template $\mathbf{T}$};
+
+% ================= stage captions (under each bottom panel) =================
+\node[cap, below=1mm of p1] {\textbf{Input}\\ aerial frame $+$ 3D box $+$ camera};
+\node[cap, below=1mm of p2] {\textbf{Geometry}\\ body axis: 4 candidates $\{\pm a,\pm b\}$\\ \emph{an axis, not a direction}};
+\node[cap, below=1mm of p4] {\textbf{Fuse}\\ mask to the axis, score the 2 ends};
+\node[cap, below=1mm of p5] {\textbf{Heading} $\hat{\mathbf h}$\\ $\alpha=\operatorname{atan2}(\hat{\mathbf h}\!\cdot\!\mathbf s,\ \hat{\mathbf h}\!\cdot\!\mathbf r)$};
+\node[cap, below=1mm of p6] {\textbf{Viewpoint tag}\\ flank / face / rear (re-ID)};
+
+% ================= dashed "offline, once" region =================
+\begin{scope}[on background layer]
+  \node[draw, dashed, rounded corners, fit=(walk)(tmpl), inner sep=3mm,
+        label={[font=\scriptsize\itshape, align=center]above:%
+        Template construction --- built \textbf{once per species} from all \emph{training} walking crops\\
+        (pooled over videos), then reused unchanged at inference \,$\cdot$\, \textbf{no human labels}}] {};
+\end{scope}
+
+% ================= >>> IMAGE BAND <<< =================
+% The strip of clear space around y = 1.0 .. 2.0 cm (between the bottom images and the DINOv3 hub)
+% is deliberately left empty: paste a row of real example frames (a short filmstrip) here when you
+% assemble the final figure. Add e.g.:  \node at (X,1.5) {\includegraphics[...]{figs/strip_kk.jpg}};
+
+\end{tikzpicture}
+\caption{\textbf{Method.} From a single aerial frame and a 3D box (any monocular 3D detector; WildBox
+here) with its camera, \emph{geometry} yields the animal's body \emph{axis}: the box fixes two
+horizontal axes and hence four candidate directions $\{\pm a,\pm b\}$, but not which end is the head.
+A \textbf{frozen} DINOv3 (centre) --- the \emph{same} network for both lanes --- turns a crop into a
+rump$\to$head profile. \emph{Offline (top, dashed)} it builds a species \emph{template} $\mathbf{T}$,
+\textbf{once per species}, by averaging the profiles of \textbf{walking} training animals whose head is
+labelled for free by the direction of motion (no human orientation labels); $\mathbf{T}$ is then reused
+unchanged on every test frame. At inference (bottom) geometry \emph{proposes} the axis and appearance
+\emph{resolves} only the sign, giving the signed heading $\hat{\mathbf h}$; with the ground normal and
+camera this becomes the allocentric angle $\alpha$ and, in closed form, the re-ID \emph{viewpoint tag}
+--- which flank is visible and how broadside. Nothing is trained.}
+\label{fig:method}
+\end{figure*}

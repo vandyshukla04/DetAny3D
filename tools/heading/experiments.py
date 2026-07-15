@@ -120,9 +120,19 @@ def evaluate(crops, idx, S, d, *, tag):
 
     rows = []
 
-    # --- 1. RANDOM SIGN: geometry gives the axis, the sign is a coin flip ---
-    pick = np.array([ends(k, geo[k])[rng.integers(2)] for k in range(n)])
-    rows.append(metrics("random sign", pick == y, None, np.zeros(n, bool), n))
+    # --- 1. UNINFORMED SIGN: geometry proposes the axis; the sign is a coin flip, NO appearance. ---
+    # This is the chance floor for a method that USES THE GEOMETRIC AXIS -- not a pure 50/50 coin.
+    # Whenever the true head lies on the OTHER axis (the proposed axis is wrong), the flip can never
+    # hit it, so the expected accuracy is 0.5 x P(head on the proposed axis) and sits BELOW 50% by
+    # exactly the axis-selection error (e.g. ~42% on stationary, where the axis is right ~84%).
+    # Averaged over N_SEED draws so it is not a single-coin artefact.
+    N_SEED = 50
+    hit = np.zeros(n)
+    for seed in range(N_SEED):
+        rr = np.random.default_rng(seed)
+        pk = np.array([ends(k, geo[k])[rr.integers(2)] for k in range(n)])
+        hit += (pk == y)
+    rows.append(metrics("uninformed sign", hit / N_SEED, None, np.zeros(n, bool), n))
 
     # --- 2. LOCOMOTION REFERENCE: sign 100% by construction (this IS the label). ---
     rows.append(metrics("locomotion reference", np.ones(n, bool), None, np.zeros(n, bool), n))

@@ -75,7 +75,7 @@ Sign/flank are what the method decides. (Box axes sit 9.1° from motion — the 
 
 | setting | n | sign | flank* |
 |---|---:|---:|---:|
-| random sign | 5768 | 46.9% | — |
+| uninformed sign *(coin on proposed axis, 50 seeds)* | 5768 | 45.7% | — |
 | locomotion reference *(= the label)* | 5768 | 100% | — |
 | appearance, oracle axis | 5767 | 93.5% | — |
 | **FULL METHOD** | 5767 | **87.4%** | **95.0%** |

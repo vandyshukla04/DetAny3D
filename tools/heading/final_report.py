@@ -221,6 +221,13 @@ def main() -> int:
              "only where a flank is visible (|sin α| ≥ 0.35); elsewhere the animal is head-on and no "
              "flank exists to name. This is the tag re-ID consumes.")
     f.append("")
+    f.append("- **Uninformed sign** (baseline) — the chance floor *for a method that uses the "
+             "geometric axis*: a coin flip between the two ends of the proposed axis, with no "
+             "appearance, averaged over 50 seeds. Because the true head lies off the proposed axis "
+             "on a fraction of frames, its accuracy is 0.5 × (axis-selection rate) and sits **below "
+             "50%** (≈42% on the stationary set, where the axis is right 84% of the time). It is not "
+             "a 50/50 coin — a coin flip on the *true* axis is the 50% line.")
+    f.append("")
     f.append("*We do not report an angular (azimuth) error.* Azimuth is the heading, but the azimuth "
              "**error** does not isolate the method: because the heading is quantised to the box "
              "faces, a correct prediction inherits the box-axis error and a wrong one is a ~180° "

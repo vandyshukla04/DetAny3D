@@ -330,12 +330,14 @@ the stationary transfer set it is the motion direction from either side of a `WA
 
 | setting | sign | flank* |
 |---|---:|---:|
-| random sign | 46.9% | — |
+| uninformed sign *(coin flip on the proposed axis, 50 seeds)* | 45.7% | — |
 | locomotion reference *(= the label)* | 100% | — |
 | appearance, oracle axis *(axis given; isolates the sign)* | 93.5% | — |
 | **full method** | **87.4%** | **95.0%** |
 
 Per species, full method — sign: rhino 91.9% · elephant 77.3% · zebra 73.8% · giraffe 100% (n=30).
+
+*The uninformed-sign baseline is a coin flip **on the geometry-proposed axis**, not a pure 50/50 coin. Its expected accuracy is 0.5 × the axis-selection rate, so it sits below 50% by the axis error — 45.7% here (axis right 92%), 42.4% on the stationary set (axis right 84%). A coin flip on the *true* axis is 50.1% ± 1.4%.*
 
 *One crop of 5,768 is exactly end-on: its body axis projects to a point, there is no profile, and the
 appearance rows **abstain** on it (n=5,767). The geometry-only rows keep all 5,768. An abstention,

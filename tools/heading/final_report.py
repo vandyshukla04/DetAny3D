@@ -328,6 +328,21 @@ def main() -> int:
                  "*where* the failures sit; read them before reading the headline gap.")
         f.append("")
 
+    # ---- human check ----
+    if R.get("human"):
+        h = R["human"]
+        f.append("## 4. Human check — grazing zebras, human face-locks")
+        f.append("")
+        f.append("The only reference in the study **not** derived from our own motion labels. Two "
+                 "videos of **grazing** zebras, hand-annotated, held out of training permanently. "
+                 "These are committed standers — the animals `bridges.py` cannot reach — so this is "
+                 "also the only test on the true 86%. Agreement here means the free motion labels "
+                 "are sound; disagreement means they are not.")
+        f.append("")
+        table(h.get("rows", []), f, h)
+        bands(h.get("bands", []), f)
+        f.append("")
+
     # ---- figures ----
     fc = args.report / "fig" / "figures.csv"
     if fc.is_file():

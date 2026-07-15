@@ -30,11 +30,20 @@ echo "output: $R"
 
 CROPS=$D/crops.npz
 STAND=$D/crops_stand.npz
+HUMAN=$D/crops_human.npz
 
 log() { echo -e "\n\033[1m=== $* ===\033[0m"; }
 die() { echo "[FATAL] $*" >&2; exit 1; }
 
 [[ -f "$CROPS" ]] || die "no $CROPS  (cwd is $PWD -- is the file really there?)"
+
+HUMAN_ARG=()
+if [[ -f "$HUMAN" ]]; then
+    HUMAN_ARG=(--human-crops "$HUMAN")
+else
+    echo "  WARNING: no $HUMAN -- the HUMAN check (grazing zebras) will be SKIPPED."
+    echo "           It is the only number that does not depend on our own labels being right."
+fi
 
 STAND_ARG=()
 if [[ -f "$STAND" ]]; then
@@ -54,7 +63,7 @@ python -m tools.heading.check_masks --crops "$CROPS" --workers 32 \
 # ---- 2. THE experiments: main table, ablation, transfer ----
 log "2/5  experiments (main table + ablation + transfer test)"
 python -m tools.heading.experiments \
-    --crops "$CROPS" "${STAND_ARG[@]}" \
+    --crops "$CROPS" "${STAND_ARG[@]}" "${HUMAN_ARG[@]}" \
     --out "$R/exp" --layer "$LAYER" --facet "$FACET" --size "$SIZE" --batch "$BATCH" \
     2>&1 | tee "$R/logs/2_experiments.txt"
 

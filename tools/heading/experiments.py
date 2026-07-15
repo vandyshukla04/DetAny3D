@@ -218,7 +218,10 @@ def main() -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--crops", type=Path, required=True)
     ap.add_argument("--stand-crops", type=Path, default=None,
-                    help="crops_stand.npz from bridges.py -- THE TRANSFER TEST")
+                    help="crops_stand.npz from bridges.py -- the transfer test (brief stops)")
+    ap.add_argument("--human-crops", type=Path, default=None,
+                    help="crops_human.npz -- 2 videos of GRAZING zebras with HUMAN face-locks. The "
+                         "only independent check, and the only committed standers we have.")
     ap.add_argument("--out", type=Path, required=True)
     ap.add_argument("--model", default=DEFAULT_MODEL)
     ap.add_argument("--device", default="cuda")
@@ -312,6 +315,29 @@ def main() -> int:
             print(f"  from walking animals; these are standing ones, on videos it never saw. A small")
             print(f"  gap means DINOv3 carries the locomotion anchor beyond the frames that produced")
             print(f"  it. A large gap means locomotion only works where locomotion already was.")
+
+        # ---- THE HUMAN CHECK: grazing zebras, human face-locks, never in training ----
+        # The ONLY reference in the study that does not come from our own motion labels. Both videos
+        # are held out permanently (split.HUMAN_LOCKED_VIDEOS). These animals GRAZE -- committed
+        # standers that bridges.py cannot reach -- so this is also our only test on the true 86%.
+        if args.human_crops:
+            print("\n\n=== HUMAN-LABELLED GRAZING ZEBRAS (independent check) ===")
+            hu = CropSet(args.human_crops)
+            idx_h = np.arange(len(hu))          # both videos held out permanently
+            hu.prefetch(idx_h)
+            print(f"  {len(idx_h)} crops, 2 videos. Labels from a HUMAN, not from motion.")
+            S_h = score_all(ex, hu, idx_h, tmpl, args.batch)
+            out["human"], _, _ = evaluate(hu, idx_h, S_h, hu.d,
+                                          tag="HUMAN-LABELLED grazing zebras")
+            zw = next((r for r in out["main"]["per_species"] if r["species"] == "zebra"), None)
+            h_ = out["human"]["rows"][3]
+            if zw:
+                print(f"\n  zebra, WALKING (our motion labels): sign {100*zw['sign']:.1f}%")
+            print(f"  zebra, GRAZING (HUMAN labels)     : sign {100*h_['sign']:.1f}%   "
+                  f"flank {100*h_['flank_vis']:.1f}%")
+            print(f"\n  This is the only number that does not assume our own labels are right.")
+            print(f"  Agreement here means the free motion labels are sound; disagreement means")
+            print(f"  they are not, and everything else inherits it.")
 
     args.out.mkdir(parents=True, exist_ok=True)
     def _cnt(a):

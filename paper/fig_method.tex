@@ -1,0 +1,73 @@
+% Main method figure — simple technical flowchart (TikZ, no external graphics).
+% Requires, in the preamble:  \usepackage{tikz}\usetikzlibrary{arrows.meta,positioning,fit,backgrounds,calc}
+% Full-width in a two-column paper: use figure* .  In a single column it fits \textwidth if scaled.
+% The "Frozen DINOv3" nodes are the natural place to overlay an architecture inset later.
+
+\begin{figure*}[t]
+\centering
+\begin{tikzpicture}[
+  font=\small,
+  >={Latex[length=2mm]},
+  blk/.style ={draw, rounded corners=2pt, align=center, inner sep=4pt,
+               minimum height=9mm, minimum width=24mm},
+  dat/.style ={draw, align=center, inner sep=4pt, minimum height=9mm}, % sharp = data
+  out/.style ={draw, thick, rounded corners=2pt, align=center, inner sep=4pt,
+               minimum height=9mm},
+  ar/.style  ={->, thick},
+  lab/.style ={midway, font=\scriptsize\itshape, inner sep=1pt},
+  node distance=6mm and 8mm,
+]
+
+% ---------------- OFFLINE: template construction (top lane) ----------------
+\node[dat] (twc) {Walking crops\\[-1pt]{\scriptsize heading $=$ world velocity}\\[-1pt]{\scriptsize (free, signed)}};
+\node[blk, right=of twc] (tdino) {Frozen DINOv3\\[-1pt]{\scriptsize $\to$ axis profile}};
+\node[out, right=of tdino] (tmpl) {Species template $\mathbf{T}$\\[-1pt]{\scriptsize mean rump$\to$head profile}};
+\draw[ar] (twc) -- (tdino);
+\draw[ar] (tdino) -- (tmpl);
+
+% ---------------- INFERENCE (main lane, below) ----------------
+\node[dat, below=16mm of twc.west, anchor=west] (box) {3D box $+$ camera\\[-1pt]{\scriptsize (WildBox / detector)}};
+\node[blk, right=of box] (geo) {Propose axis\\[-1pt]{\scriptsize longest ground-plane}\\[-1pt]{\scriptsize extent $\Rightarrow$ 2 of 4 dirs}};
+\node[dat, right=of geo] (crop) {Target crop\\[-1pt]{\scriptsize $+$ SAM inst.\ mask}};
+\node[blk, right=of crop] (dino) {Frozen DINOv3\\[-1pt]{\scriptsize dense patch feats}};
+\node[blk, right=of dino] (prof) {Axis profile\\[-1pt]{\scriptsize patches binned}\\[-1pt]{\scriptsize rump$\to$head}};
+\node[blk, right=of prof] (score) {Score both ends\\[-1pt]{\scriptsize vs $\mathbf{T}$ $\to \arg\max$}};
+
+\draw[ar] (box)  -- (geo);
+\draw[ar] (geo)  -- (crop);
+\draw[ar] (crop) -- (dino);
+\draw[ar] (dino) -- (prof);
+\draw[ar] (prof) -- (score);
+\draw[ar] (geo.south) |- ++(0,-7mm) -| (score.south) node[lab, near start]{restricts to proposed axis};
+\draw[ar] (tmpl) -- (score) node[lab, right]{$\mathbf{T}$};
+
+% ---------------- OUTPUT (bottom) ----------------
+\node[dat, below=16mm of crop] (head) {Signed heading $\hat{\mathbf h}$};
+\node[blk, right=of head] (alpha) {$\alpha=\operatorname{atan2}(\hat{\mathbf h}^{\!\top}\mathbf s,\ \hat{\mathbf h}^{\!\top}\mathbf r)$\\[-1pt]{\scriptsize $\mathbf r$ = camera ray, $\mathbf s=\mathbf u\times\mathbf r$}};
+\node[out, right=of alpha] (tag) {Viewpoint tag\\[-1pt]{\scriptsize flank $=\operatorname{sign}(\sin\alpha)$, broadside $=|\sin\alpha|$}\\[-1pt]{\scriptsize face/rear $=\operatorname{sign}(\cos\alpha)$}};
+
+\draw[ar] (score.south) |- (head.east);
+\draw[ar] (head)  -- (alpha);
+\draw[ar] (alpha) -- (tag);
+
+% ---------------- dashed grouping boxes ----------------
+\begin{scope}[on background layer]
+  \node[draw, dashed, rounded corners, fit=(twc)(tmpl),
+        inner sep=6mm, label={[font=\footnotesize\itshape]above:Template construction —
+        once, from walking animals, no human labels}] {};
+  \node[draw, dotted, rounded corners, fit=(box)(score),
+        inner sep=4mm, label={[font=\footnotesize\itshape]below left:%
+        Inference — any frame, walking or standing}] {};
+\end{scope}
+
+\end{tikzpicture}
+\caption{\textbf{Method.} \emph{Top:} the species template $\mathbf{T}$ is the mean anatomical
+profile (rump$\to$head, along the body axis) of walking crops, whose head end is labelled for free
+by the direction of motion; nothing is trained. \emph{Bottom:} at inference, geometry proposes the
+body axis (the box's longer ground-plane axis) and restricts the choice to its two directions; a
+frozen DINOv3 profile of the target crop scores each end against $\mathbf{T}$, resolving the head.
+The signed heading $\hat{\mathbf h}$, the ground normal, and the camera give the observation angle
+$\alpha$, from which the camera-facing flank and its broadside/face/rear components follow in closed
+form. DINOv3 is frozen throughout and shared between the two lanes.}
+\label{fig:method}
+\end{figure*}

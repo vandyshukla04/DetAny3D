@@ -421,3 +421,69 @@ every second frame leaves 12,762 crops." Exact halving would give 12,777; the re
 are dropped by the minimum-size and projection filters in `extract_crops.py`. The sentence is not
 wrong, but "retaining every second frame **and discarding crops below the minimum size** leaves
 12,762" would forestall a reader checking the division.
+
+
+---
+
+## 8. Are the two manually labelled zebra videos inside the 60? — **YES** (checked 2026-08-11)
+
+Established from the video IDs, not inferred.
+
+```
+videos in papersubdata (gazelle excluded) : 60
+  with walking anchors (in crops.npz)     : 53   -> 20 evaluation + 33 template
+  with ZERO walking anchors               :  7   -> all on the non-evaluation side
+```
+
+| | `DJI_20250802085130_0007_V` | `DJI_20250802085520_0008_V` |
+|---|---|---|
+| in the 60-video pool | **YES** (zebra) | **YES** (zebra) |
+| has walking crops | YES | YES |
+| among the 20 **evaluation** videos | **YES** | **YES** |
+| among the 7 zero-anchor videos | **NO** | **NO** |
+| walking crops contributed | **166** | **2** |
+
+Both are forced into the evaluation split by `split.HUMAN_LOCKED_VIDEOS`
+(`split.py:50`, applied at `split.py:70`), so they are a **subset of the 20 evaluation videos**, not
+an additional pool.
+
+**The seven zero-anchor videos, by ID** (none is a locked video):
+`DJI_20240119151946_0004_V`, `DJI_20240119152335_0005_V`, `DJI_20240119152552_0006_V`,
+`DJI_20250128082221_0004_V`, `DJI_20250303174548_0001_D`, `DJI_20250304162356_0004_D`,
+`DJI_20250802121253_0004_V`. Six are elephant/rhino/giraffe; one (`…121253_0004_V`) is zebra — it has
+4 segments and 3,122 detections but no walking interval passing both gates. All seven sit on the
+non-evaluation side by construction, since `video_split` only ever sees videos present in
+`crops.npz`. So the manuscript's **"40 non-evaluation videos, 33 with retained anchors"** is correct.
+
+### The consequence the manuscript does not currently state
+
+**The walking evaluation set and the manually labelled zebra set are not disjoint at the video level.**
+They draw on the same two videos:
+
+- **168 of the 5,768** walking evaluation crops (**2.9%**) come from the two locked videos;
+- those 168 are **20% of the 859 zebra** walking evaluation crops.
+
+They are different *observations* — walking frames referenced by displacement, versus grazing frames
+referenced by human face-locks — but the same *footage*, so the two result blocks are not statistically
+independent, and one fifth of the zebra walking number comes from the same two flights as the manual
+set.
+
+**This is not leakage.** Neither video contributes to template construction or to configuration
+selection: both are in the evaluation 20, and the fit/validation split of §A operates only on the 33
+template-side videos. Verified programmatically. The manuscript's claim that "neither the evaluation
+videos nor the manually labelled videos contribute to configuration selection or template
+construction" is **true as written**.
+
+**But the wording invites a wrong reading.** "A *separate* manually labelled zebra set … from two
+grazing videos" implies a distinct pool of videos. It is separate in observations and in reference
+type, not in source footage. Suggested replacement:
+
+> The manually labelled zebra set comprises 5,542 grazing observations from two of the twenty
+> evaluation videos, annotated with a reference independent of displacement. These two videos are held
+> out of template construction and configuration selection under every seed; they also contribute 168
+> walking observations (2.9\%) to the walking evaluation set, so the two evaluations share footage
+> while using disjoint observations and independent references.
+
+The parallel sentence in §4 — "Neither the evaluation videos nor the manually labelled videos
+contribute to …" — should become "Neither the evaluation videos (which include the two manually
+labelled videos) nor …", so the set relationship is explicit rather than implied.

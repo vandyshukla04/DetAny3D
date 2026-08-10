@@ -64,7 +64,7 @@ fit and validation are disjoint, and **neither contains any of the 20 evaluation
 > 30/10 split becomes **23/10** on the videos that actually exist.
 
 ```
-Template-fit: 23 videos, 4,966 walking crops   (templates built from a 1,500-crop sample, as in the final method)
+Template-fit: 23 videos, 4,966 walking crops   (1,500 crops drawn; 1,499 contribute a profile -- see D.7)
 Validation:   10 videos, 2,028 walking crops
 Evaluation:   20 videos, 5,768 walking observations   — untouched
 ```
@@ -164,7 +164,7 @@ argument for 224 can still be made in the text — as a deployment note, not as 
 
 ## D. Final evaluation of the selected configuration
 
-Templates rebuilt from **all 33 template videos** (1,500-crop sample, exactly as the method operates),
+Templates rebuilt from **all 33 template videos** (1,500 crops drawn, **1,499 contribute** -- D.7),
 then evaluated **once** on the 20 evaluation videos.
 
 ### D.1 Reference run — the incumbent L24/token/224 (`REPORT_v4`, fp32)
@@ -204,7 +204,7 @@ another name.
 
 ### D.3 Selected configuration — L24/token/448 (`REPORT_v5`, fp32)
 
-Templates rebuilt from all 33 template videos (1,500-crop sample), evaluated once on the 20 evaluation
+Templates rebuilt from all 33 template videos (1,500 drawn, **1,499 contribute** -- D.7), evaluated once on the 20 evaluation
 videos. **This is the result of record.**
 
 ```
@@ -300,7 +300,86 @@ rows (45.7 / 42.4 / 49.2), the same identity that holds in every other row; and 
 **`≤30` also equals Heading** (49.2), the degeneracy of §D.2 — which is why `—` is the right entry
 there.
 
-### D.6 Two caption additions
+### D.6 The viewing-angle table, complete at the selected configuration
+
+All from `REPORT_v5`. **This replaces the mixed 224/448 version wholesale.** Band membership is by
+`|sin α|` computed from the *true* heading, so the bin boundaries and counts depend only on geometry —
+but the walking counts change from the manuscript's because **the 448 configuration has no abstention**
+and evaluates all 5,768 walking observations (§D.7), where 224 evaluated 5,767.
+
+| set | band | n | Heading ↑ | Flank ↑ |
+|---|---|---:|---:|---:|
+| **Walking** | [0, 0.35) head-on | 1,297 | 74.4 | — |
+| | [0.35, 0.70) oblique | 2,224 | 91.5 | 94.8 |
+| | [0.70, 1] broadside | 2,247 | 90.1 | 95.4 |
+| **Stationary** | [0, 0.35) head-on | 432 | 57.2 | — |
+| | [0.35, 0.70) oblique | 495 | 82.4 | 90.7 |
+| | [0.70, 1] broadside | 477 | 65.4 | 92.5 |
+| **Manual zebra** | [0, 0.35) head-on | 261 | 34.1 | — |
+| | [0.35, 0.70) oblique | 579 | 90.8 | 90.8 |
+| | [0.70, 1] broadside | 4,702 | 96.4 | 98.4 |
+
+**The head-on flank cell is `—` by definition, not by omission.** `experiments.py` does print a number
+there (79.6 walking, 57.4 stationary, 34.1 manual zebra), because it computes band flank over *every*
+crop in the band rather than over visible ones. But the method defines flank accuracy only where
+`|sin α| ≥ 0.35`, and in the head-on band **no crop satisfies that** — so the printed value is the
+agreement rate on frames where no flank exists, which is a different quantity. It must not be placed in
+a column headed "flank accuracy".
+
+**Reconciliation — every headline number is recovered from these bands**, which is the check that the
+table is internally consistent rather than transcribed:
+
+| set | Σ band n | reported n | coverage from bands | reported | flank from bands | reported |
+|---|---:|---:|---:|---:|---:|---:|
+| walking | 5,768 | 5,768 | 77.51% | 77.5 | **95.10** | 95.1 |
+| stationary | 1,404 | 1,404 | 69.23% | 69.2 | **91.58** | 91.6 |
+| manual zebra | 5,542 | 5,542 | 95.29% | 95.3 | **97.57** | 97.6 |
+
+(coverage = the [0.35,1] bands as a fraction of n; flank = their n-weighted mean.)
+
+Two things worth a sentence in the text: the manual-zebra head-on band is **34.1%, below chance** — the
+honest signature of a band where the body axis barely projects and there is nothing to read; and the
+**broadside band is unchanged at 96.4 / 98.4 on n = 4,702** between 224 and 448, so the headline claim
+about the frames that matter does not depend on the configuration change.
+
+### D.7 Template accounting — the 1,499 vs 1,500 discrepancy, resolved
+
+**The manuscript is right; this report's earlier wording was wrong.** The two records were describing
+different quantities.
+
+| species | template crops |
+|---|---:|
+| elephant | 587 |
+| giraffe | 187 |
+| rhino | 285 |
+| zebra | 440 |
+| **total** | **1,499** |
+
+**Identical in `REPORT_v4` (224 px) and `REPORT_v5` (448 px)** — the fit indices are the same (seed 0,
+same split) and the same crop fails at both resolutions, so the configuration change does not touch
+this table.
+
+The mechanism, from `template.py`:
+
+```python
+prof, cnt = axis_profile(g, fg, it.face_uv[t], it.face_uv[it.y_face], self.cfg.bins)
+if not cnt.sum():
+    return                      # <- returns WITHOUT incrementing self.n
+...
+self.n[sp] += 1
+```
+
+`--fit 1500` draws exactly **1,500** crop indices. `n_fitted` counts only those that produced an
+occupied profile, and one crop in the draw is exactly end-on — its body axis projects to a point, so
+`axis_profile` yields no occupied bins and it contributes nothing. Hence **1,500 drawn, 1,499
+contributing**.
+
+**Action: change this report's wording, not the manuscript's table.** The manuscript's 1,499 is the
+number that belongs in a data-accounting table, because it is the number of crops that actually
+entered the template. Where the sampling procedure is described, say "1,500 crops sampled, of which
+1,499 yield a profile" so the two numbers are never again in apparent conflict.
+
+### D.8 Two caption additions
 
 The `—` entries in the manual-zebra block are currently unexplained, and a reader who notices that
 `≤30` would equal Heading there will (correctly) wonder why:
@@ -315,7 +394,7 @@ And since Random sign is now an averaged estimator whose expectation is not 50%:
 > geometry-proposed axis, averaged over 50 seeds; its expectation is
 > 0.5 × P(head on the proposed axis), not 0.5.
 
-### D.7 One incidental change worth a footnote
+### D.9 One incidental change worth a footnote
 
 **At 448 there are no abstentions: n = 5,768 on every row.** At 224 exactly one crop was exactly end-on,
 its body axis projected to a point, and the appearance rows reported n = 5,767. At 448 that crop has
@@ -368,7 +447,9 @@ against the same free labels*, which is what makes it comparable to the training
 | 2 | Selected configuration becomes **L24/token/448** | the predefined rule |
 | 3 | All appearance-dependent numbers → `REPORT_v5` (§D.3, §D.4) | configuration changed |
 | 4 | "40 non-evaluation videos" → "40, of which **33** contribute walking anchors" | 7 yield no crops |
-| 4b | Main table: refresh the **Random sign** rows (7 stale cells, §D.5) and add the two caption sentences (§D.6) | carried over from REPORT_v2 at 224 px with a single coin draw |
+| 4b | Main table: refresh the **Random sign** rows (7 stale cells, §D.5) and add the two caption sentences (§D.8) | carried over from REPORT_v2 at 224 px with a single coin draw |
+| 4c | Replace the **viewing-angle table wholesale** with §D.6 | current version mixes 224 and 448; walking counts change 5,767 → 5,768 |
+| 4d | Template accounting stays at **1,499** — no change to the manuscript | §D.7: 1,500 drawn, 1,499 contribute a profile. Only the sampling *description* needs the extra clause |
 | 5 | Drop the strong "centring and the axis prior are redundant" phrasing | gap is 0.5 pt at 448, not 0.1 |
 | 6 | State that manual-zebra angular error is **undefined by construction**; report sign/flank only | §D.2 |
 | 7 | Remove the 5,768→5,767 abstention sentence for the selected configuration | no abstentions at 448 |

@@ -74,11 +74,31 @@ def main() -> int:
     ap.add_argument("--warmup", type=int, default=10)
     ap.add_argument("--iters", type=int, default=100)
     ap.add_argument("--sweep", action="store_true", help="resolution x dtype x batch forward sweep")
+    ap.add_argument("--allow-shared", action="store_true",
+                    help="measure even though another process holds GPU memory. The result is NOT a "
+                         "property of the method and must not go in a paper.")
     ap.add_argument("--seed", type=int, default=0)
     args = ap.parse_args()
 
     import torch
     from PIL import Image
+
+    # ---- REFUSE to time a contended GPU. -------------------------------------------------------
+    # The docstring has always said "run it ALONE", but nothing enforced it, and a run that shared
+    # the card with a 9.8 GB job produced 30.6 crops/s where the exclusive figure was ~357 -- a 12x
+    # error that looks like a plausible measurement. Check BEFORE allocating anything.
+    if args.device == "cuda" and torch.cuda.is_available():
+        free_b, total_b = torch.cuda.mem_get_info()
+        other_gb = (total_b - free_b) / 1e9
+        if free_b < 0.90 * total_b:
+            msg = (f"GPU IS NOT EXCLUSIVE: {other_gb:.1f} GB of {total_b/1e9:.1f} GB is already in "
+                   f"use by another process. A contended GPU inflates these timings several-fold, "
+                   f"and that is not a property of the method.")
+            if not args.allow_shared:
+                print(f"[FATAL] {msg}\n        Wait for the GPU (nvidia-smi), or pass "
+                      f"--allow-shared to measure anyway -- but do NOT report the result.")
+                return 2
+            print(f"  WARNING: {msg}  (--allow-shared given; results are NOT reportable)\n")
 
     sync = torch.cuda.synchronize if (args.device == "cuda" and torch.cuda.is_available()) else None
     cfg = Config(args.layer, args.facet, args.size, args.bins)
@@ -195,16 +215,25 @@ def main() -> int:
                         for bs in (1, 8, 32, 64):
                             batch = imgs[:bs] if len(imgs) >= bs else np.repeat(
                                 imgs[:1], bs, axis=0)
-                            st = _reps(lambda b=batch: ex2.grid(b, c2),
-                                       warmup=max(3, args.warmup // 2),
-                                       iters=max(20, args.iters // 2), sync=sync)
+                            # A large batch at 448 can exhaust a 16 GB card. Losing the whole run
+                            # -- and the JSON, which is written at the very end -- to the LAST
+                            # batch size is a poor trade for one missing cell.
+                            try:
+                                st = _reps(lambda b=batch: ex2.grid(b, c2),
+                                           warmup=max(3, args.warmup // 2),
+                                           iters=max(20, args.iters // 2), sync=sync)
+                            except torch.OutOfMemoryError:
+                                torch.cuda.empty_cache()
+                                percrop[bs] = None
+                                continue
                             pc = st["median"] / bs
                             percrop[bs] = pc
                             best_fps = max(best_fps, 1e3 / pc)
                         sweep.append({"size": sz, "dtype": dt, "ms_per_crop": percrop,
                                       "best_fps": best_fps})
                         print(f"   {sz:>4d} {dt:>5s} " +
-                              " ".join(f"{percrop[b]:8.2f}" for b in (1, 8, 32, 64)) +
+                              " ".join(f"{percrop[b]:8.2f}" if percrop.get(b) else f"{'OOM':>8s}"
+                                       for b in (1, 8, 32, 64)) +
                               f"   {best_fps:9.1f}")
             rec["forward_sweep"] = sweep
 

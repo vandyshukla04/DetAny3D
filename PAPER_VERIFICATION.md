@@ -345,3 +345,79 @@ produced the paper.
 
 The geometry-only re-derivations in §1.3, §2.2 and §3.5 need no GPU — they read `az`, `face_az`,
 `y_face`, `face_ids`, `geo_axis` straight from the crop npz files.
+
+
+---
+
+## 7. Full numerical audit of the manuscript (2026-07-28)
+
+Every number in the submitted LaTeX checked against the artefacts. **Deductions and prose were not
+audited — only the figures.**
+
+### 7.1 Verified exactly (no discrepancies)
+
+| where | checked |
+|---|---|
+| §3 Method constants | W=15, 0.30 body lengths, cos 0.8, 448×448, layer 24, B=5, \|sin α\|≥0.35 — all match the CLI defaults and the selected config |
+| §4 Data/split | 60 videos · 25,554 motion obs · 12,762 crops · 6,994 non-eval · 33 contributing · 23/10 fit/val · 5,768 walking eval · 5,542 manual zebra · 1,404 stationary |
+| §4 arithmetic | 6,994 + 5,768 = 12,762 ✓ |
+| **Table 1** (11 result rows) | every cell against `REPORT_v5`; Random-sign rows against the offline 50-seed estimator |
+| **Table 2** (data accounting) | all 20 species cells + 4 totals against `results.json → data` |
+| **Table 3** (ablation) | 87.1 / 86.6 / 85.6 / 82.4, and the stated deltas 4.7 / 1.5 / 0.5 |
+| **Table 4** (config sweep) | all 8 rows × 9 columns against `sweep_val.json` |
+| **Table 5** (per species) | 722/77.1 · 30/100.0 · 4,157/91.8 · 859/72.1, total 5,768/87.1 |
+| **Table 6** (viewing angle) | all 9 rows; **and it reconciles to Table 1** — band-weighted flank recovers 95.10 / 91.58 / 97.57 and coverage 77.51 / 69.23 / 95.29 |
+| §5 text | 9.1 · 8.5 · 93.0 · 87.1 · 83.5 · 9.9 · 78.8 · 68.9 · 42.4 · 92.9 · 94.7 · 4,702 of 5,542 · 96.4 · 34.1 · 95.1/91.6/97.6 |
+| derived percentages | rhino = 72.1% of walking obs; broadside = 84.8% of the manual set |
+| §B "200 random camera–heading configurations" | backed by `tests/test_papersub.py:193` |
+
+Table 5's zebra n = **859** (not 858) is correct for the selected configuration: at 448 there is no
+abstention, so the per-species counts sum to the full 5,768.
+
+### 7.2 Two numbers that cannot be traced to any artefact
+
+**(a) "A separate MLP baseline … reaches 79.8\% App-4 accuracy" (Appendix D).**
+Searched `/mnt/d/detany3d` and the repo: **no checkpoint, no `features.npz`, no metrics file.** The
+value survives only as a hardcoded `print` at `sweep.py:181` and as recollection in docstrings
+(`split.py:25`, `train_head.py:157`) describing the split-leak bug it was corrected for. It is
+therefore unreproducible as the manuscript stands. Two further points: it predates the current
+pipeline, and `extract_features.py` builds its input through `AutoImageProcessor` at a **fixed
+resolution**, so it is not a 448 measurement even though everything around it now is.
+**Either regenerate it (`extract_features` → `train_head`, ~30 min) or state the resolution and that
+it is a legacy baseline.**
+
+**(b) The runtime figures (§5 and Appendix G): 82.8 crops/s, 356.6 crops/s, 1.40 ms, 25.17 ms.**
+`bench.py` would emit `bench.json`, but **no `bench.json` exists anywhere** — only the script was
+copied to `/mnt/d/detany3d/heading/`. The numbers are internally consistent (356.6 / 82.8 = 4.31×,
+matching the "4× cheaper" claim), but nothing on disk backs them.
+
+### 7.3 One inconsistency worth fixing
+
+Appendix G reports runtime under **fp16**, while every result in the paper is **fp32** — and fp16 is
+the dtype documented as **silently zeroing the ViT-L forward on exactly the GPU named** (V100). The
+*timing* is probably still valid, since the kernels execute regardless of whether the output is
+garbage, but the reported configuration does not match the one being timed. Re-run `bench.py` with
+`--dtype fp32`, or state explicitly that throughput was measured in fp16 while results use fp32.
+
+### 7.4 A finding that strengthens the rebuttal
+
+The superseded sweep — the one scored on the **evaluation** videos — is still on disk at
+`REPORT_v2/desc/sweep.npz`:
+
+| | scored on **evaluation** videos (old) | scored on **validation** videos (new) |
+|---|---:|---:|
+| L24/token/**224** | **93.6** | 91.2 |
+| L24/token/**448** | 93.1 | **91.8** |
+
+**The ordering reverses.** Selecting on the evaluation set preferred 224; selecting honestly prefers
+448. So the reviewer's objection was not merely procedural — it **changed the answer**. Worth one
+sentence in the response letter, because it demonstrates the correction mattered rather than being a
+formality.
+
+### 7.5 Minor
+
+"Applying the displacement and candidate-agreement thresholds yields 25,554 observations; retaining
+every second frame leaves 12,762 crops." Exact halving would give 12,777; the remaining **15** crops
+are dropped by the minimum-size and projection filters in `extract_crops.py`. The sentence is not
+wrong, but "retaining every second frame **and discarding crops below the minimum size** leaves
+12,762" would forestall a reader checking the division.

@@ -257,7 +257,65 @@ Viewing-angle bands, walking: 74.4 / 91.5 / 90.1 (sign), 79.6 / 94.8 / 95.4 (fla
 Manual zebra: **the broadside band is identical at both resolutions — 96.4 sign / 98.4 flank on
 n=4,702**. The headline "98.4% on the frames that matter" is unchanged by the selection.
 
-### D.5 One incidental change worth a footnote
+### D.5 The main results table, complete — every cell at the selected configuration
+
+Assembled from `REPORT_v5` plus the geometry-only Random-sign row (computed with the same 50-seed
+estimator `experiments.py` uses; that row needs no network, so it is resolution-independent).
+
+| setting | n | Med. err. ↓ | ≤30° ↑ | Heading ↑ | Flank (cov.) ↑ |
+|---|---:|---:|---:|---:|---:|
+| *Walking — displacement-derived reference* | | | | | |
+| Random sign *(geometry axis)* | 5,768 | 91.5 | 43.7 | **45.7** | — |
+| Candidate oracle *(best of four)* | 5,768 | 9.1 | 94.1 | 100.0 | — |
+| Appearance *(axis given)* | 5,768 | **9.5** | **88.4** | 93.0 | — |
+| **Full method** | 5,768 | 9.9 | 83.5 | **87.1** | **95.1** (77.5) |
+| *Stationary — reference transferred across a stop* | | | | | |
+| Random sign *(geometry axis)* | 1,404 | 89.6 | 39.9 | **42.4** | — |
+| Candidate oracle *(best of four)* | 1,404 | 8.5 | 89.5 | 100.0 | — |
+| Appearance *(axis given)* | 1,404 | **10.8** | **73.8** | 78.8 | — |
+| **Full method** | 1,404 | 15.3 | 65.7 | **68.9** | **91.6** (69.2) |
+| *Manually labelled (zebra)* | | | | | |
+| Random sign *(geometry axis)* | 5,542 | — | — | **49.2** | — |
+| Appearance *(axis given)* | 5,542 | — | — | 94.7 | — |
+| **Full method** | 5,542 | — | — | **92.9** | **97.6** (95.3) |
+
+**Seven cells in the manuscript's version of this table were stale** — carried over from `REPORT_v2`
+(224 px, and a *single* coin draw rather than the 50-seed average):
+
+| cell | manuscript | corrected |
+|---|---:|---:|
+| walking Random sign — med / ≤30 / Heading | 80.4 / 44.8 / 46.9 | **91.5 / 43.7 / 45.7** |
+| stationary Random sign — med / ≤30 / Heading | 90.4 / 39.8 / 42.2 | **89.6 / 39.9 / 42.4** |
+| manual-zebra Random sign — Heading | 49.5 | **49.2** |
+
+The walking median moves the most (80.4 → 91.5), and that is correct rather than a bug. The
+random-sign error distribution is **trimodal**: ~46% near 9° (coin right), ~46% near 171° (coin wrong),
+and ~8% near 90° — the crops where the head lies on the *other* axis, which no coin can reach. The
+median therefore falls inside the sparse 90° cluster and is highly sensitive to where the 50th
+percentile lands. A single draw put it at 80.4°; the 50-seed pooled estimate is 91.5°, which is also
+what one expects a priori.
+
+Two consistency checks on the corrected row: **`≤45` equals Heading exactly** on all three random-sign
+rows (45.7 / 42.4 / 49.2), the same identity that holds in every other row; and on the manual-zebra set
+**`≤30` also equals Heading** (49.2), the degeneracy of §D.2 — which is why `—` is the right entry
+there.
+
+### D.6 Two caption additions
+
+The `—` entries in the manual-zebra block are currently unexplained, and a reader who notices that
+`≤30` would equal Heading there will (correctly) wonder why:
+
+> Angular metrics are omitted for the manually labelled zebra set: the annotator labels *which box face*
+> is the front, so the reference is itself one of the four candidates and the angular error is
+> degenerate (0° or ~180°).
+
+And since Random sign is now an averaged estimator whose expectation is not 50%:
+
+> Random sign flips one independent sign per observation, restricted to the two directions of the
+> geometry-proposed axis, averaged over 50 seeds; its expectation is
+> 0.5 × P(head on the proposed axis), not 0.5.
+
+### D.7 One incidental change worth a footnote
 
 **At 448 there are no abstentions: n = 5,768 on every row.** At 224 exactly one crop was exactly end-on,
 its body axis projected to a point, and the appearance rows reported n = 5,767. At 448 that crop has
@@ -310,6 +368,7 @@ against the same free labels*, which is what makes it comparable to the training
 | 2 | Selected configuration becomes **L24/token/448** | the predefined rule |
 | 3 | All appearance-dependent numbers → `REPORT_v5` (§D.3, §D.4) | configuration changed |
 | 4 | "40 non-evaluation videos" → "40, of which **33** contribute walking anchors" | 7 yield no crops |
+| 4b | Main table: refresh the **Random sign** rows (7 stale cells, §D.5) and add the two caption sentences (§D.6) | carried over from REPORT_v2 at 224 px with a single coin draw |
 | 5 | Drop the strong "centring and the axis prior are redundant" phrasing | gap is 0.5 pt at 448, not 0.1 |
 | 6 | State that manual-zebra angular error is **undefined by construction**; report sign/flank only | §D.2 |
 | 7 | Remove the 5,768→5,767 abstention sentence for the selected configuration | no abstentions at 448 |

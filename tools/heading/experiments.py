@@ -81,29 +81,53 @@ def score_all(ex, crops, idx, tmpl, batch, *, centred=True, masks=True):
     return S
 
 
-def metrics(name, sign_ok, flank_ok, visible, n):
-    """One row of the table. SIGN (head vs tail) and FLANK (the re-ID tag) only.
+def metrics(name, sign_ok, flank_ok, visible, n, *, az_pred=None, az_true=None):
+    """One row of the table. SIGN (head vs tail) and FLANK (the re-ID tag) are what the method decides.
 
-    We deliberately do NOT report an azimuth/angular error. The heading is quantised to the box's
-    face normals, so the azimuth error is dominated by the BOX AXIS quality, not by what the method
-    contributes -- every error is either ~0 deg (right sign) or ~180 deg (wrong sign), which is why
-    it added nothing over the sign column. Sign and flank are what the method actually decides.
+    THE ANGULAR COLUMNS AND THEIR TWO REFERENCES  -- read this before quoting them.
+    -------------------------------------------------------------------------------
+    `sign` is measured against the DISCRETE reference: `y_face`, the box candidate nearest the
+    motion direction. The angular error is measured against the CONTINUOUS reference: `az`, the
+    motion direction itself. They are different quantities and the paper must say so -- the
+    locomotion row scores sign 100% by construction yet still shows ~9 deg of median error, because
+    that 9 deg IS the quantisation gap between the continuous direction and the nearest of the four
+    candidates. It is the ceiling any candidate-selection method inherits.
+
+    Because the four candidates are ~orthogonal, the nearest one is ALWAYS within 45 deg, so
+    `acc45` is identically equal to `sign` -- verified bit-for-bit on all 14 rows. That redundancy
+    is why these columns were dropped from the default report; they are emitted again because the
+    appendix asks for median error and acc@30 explicitly.
     """
-    return {
+    out = {
         "setting": name, "n": int(n),
         "sign": float(np.mean(sign_ok)) if sign_ok is not None else float("nan"),
         "flank_vis": (float(np.mean(flank_ok[visible])) if flank_ok is not None and visible.any()
                       else float("nan")),
+        "flank_n": int(visible.sum()) if visible is not None else 0,
+        "flank_coverage": (float(np.mean(visible)) if visible is not None and len(visible)
+                           else float("nan")),
     }
+    if az_pred is not None and az_true is not None:
+        err = np.degrees(np.abs(wrap(np.asarray(az_pred) - np.asarray(az_true))))
+        out.update(median_err=float(np.median(err)),
+                   acc15=float((err <= 15).mean()),
+                   acc30=float((err <= 30).mean()),
+                   acc45=float((err <= 45).mean()))
+    return out
 
 
 def show(rows, title):
     print(f"\n=== {title} ===")
-    print(f"{'setting':<26s} {'n':>6s} {'sign':>7s} {'flank*':>8s}")
+    print(f"{'setting':<26s} {'n':>6s} {'sign':>7s} {'flank*':>8s} {'cover':>7s} "
+          f"{'median':>8s} {'@30':>7s}")
     for r in rows:
         f = "" if np.isnan(r["flank_vis"]) else f"{100*r['flank_vis']:7.1f}%"
         s = "" if np.isnan(r["sign"]) else f"{100*r['sign']:6.1f}%"
-        print(f"{r['setting']:<26s} {r['n']:6d} {s:>7s} {f:>8s}")
+        c = ("" if not np.isfinite(r.get("flank_coverage", float("nan")))
+             or r.get("flank_n", 0) == 0 else f"{100*r['flank_coverage']:6.1f}%")
+        md = "" if "median_err" not in r else f"{r['median_err']:7.2f}d"
+        a30 = "" if "acc30" not in r else f"{100*r['acc30']:6.1f}%"
+        print(f"{r['setting']:<26s} {r['n']:6d} {s:>7s} {f:>8s} {c:>7s} {md:>8s} {a30:>7s}")
     print(f"  * flank accuracy is over frames where a flank is VISIBLE (|sin alpha| >= {EDGE_ON}); "
           f"elsewhere the animal is head-on and no flank exists to name.")
 
@@ -112,6 +136,9 @@ def evaluate(crops, idx, S, d, *, tag):
     """Build every row of the main table from one set of scores."""
     fid, y, geo = d["face_ids"][idx], d["y_face"][idx], d["geo_axis"][idx]
     falpha = d["face_alpha"][idx]
+    # `faz` = each candidate's WORLD azimuth (the discrete predictions); `az_true` = the CONTINUOUS
+    # motion direction. The angular columns compare the former against the latter -- see metrics().
+    faz, az_true = d["face_az"][idx], d["az"][idx]
     n = len(idx)
     rng = np.random.default_rng(0)
 
@@ -135,7 +162,10 @@ def evaluate(crops, idx, S, d, *, tag):
     rows.append(metrics("uninformed sign", hit / N_SEED, None, np.zeros(n, bool), n))
 
     # --- 2. LOCOMOTION REFERENCE: sign 100% by construction (this IS the label). ---
-    rows.append(metrics("locomotion reference", np.ones(n, bool), None, np.zeros(n, bool), n))
+    # Its angular error is NOT zero: it is the gap between the continuous motion direction and the
+    # nearest candidate -- i.e. the quantisation ceiling. That is the number the appendix wants.
+    rows.append(metrics("locomotion reference", np.ones(n, bool), None, np.zeros(n, bool), n,
+                        az_pred=faz[np.arange(n), y], az_true=az_true))
 
     # --- 3. APPEARANCE, ORACLE AXIS: the axis is given; DINOv3 supplies only the sign ---
     # ABSTENTIONS. score_faces returns NaN when there is genuinely nothing to read -- most often
@@ -157,7 +187,8 @@ def evaluate(crops, idx, S, d, *, tag):
     t_of = np.array([opposite_slot(fid[k], int(y[k])) for k in range(n)])
     p_or = np.where(sv[np.arange(n), y] >= sv[np.arange(n), t_of], y, t_of)
     rows.append(metrics("appearance, oracle axis", (p_or == y)[ok], None,
-                        np.zeros(ok.sum(), bool), ok.sum()))
+                        np.zeros(ok.sum(), bool), ok.sum(),
+                        az_pred=faz[np.arange(n), p_or][ok], az_true=az_true[ok]))
 
     # --- 4. FULL METHOD: geometry proposes the axis, appearance disposes the sign ---
     p_full = np.array([choose(S[k], fid[k], axis=int(geo[k]))[0] for k in range(n)])
@@ -167,10 +198,12 @@ def evaluate(crops, idx, S, d, *, tag):
     fl_p = np.array([viewpoint_of(float(a))["flank"] for a in a_p])
     fl_t = np.array([viewpoint_of(float(a))["flank"] for a in a_t])
     vis = np.abs(np.sin(a_t)) >= EDGE_ON
-    rows.append(metrics("FULL METHOD", (p_full == y)[m], (fl_p == fl_t)[m], vis[m], m.sum()))
+    rows.append(metrics("FULL METHOD", (p_full == y)[m], (fl_p == fl_t)[m], vis[m], m.sum(),
+                        az_pred=faz[np.arange(n), np.maximum(p_full, 0)][m], az_true=az_true[m]))
 
     # --- 5. + VISIBILITY: the same predictions, read out as the re-ID tag ---
-    rows.append(metrics("FULL + visibility", (p_full == y)[m], (fl_p == fl_t)[m], vis[m], m.sum()))
+    rows.append(metrics("FULL + visibility", (p_full == y)[m], (fl_p == fl_t)[m], vis[m], m.sum(),
+                        az_pred=faz[np.arange(n), np.maximum(p_full, 0)][m], az_true=az_true[m]))
 
     show(rows, f"MAIN COMPONENT TABLE -- {tag}")
 
@@ -284,10 +317,8 @@ def main() -> int:
         fid = d["face_ids"][idx_te]
         p_app = np.array([choose(S[k], fid[k])[0] for k in range(n)])
         y = d["y_face"][idx_te]
-        faz, az_true = d["face_az"][idx_te], d["az"][idx_te]
         m = p_app >= 0
         abl.append(metrics("  - geometric axis prior",
-                           faz[np.arange(n), np.maximum(p_app, 0)][m], az_true[m],
                            (p_app == y)[m], None, np.zeros(m.sum(), bool), m.sum()))
         show(abl, "COMPACT ABLATION (each row removes ONE component from the full method)")
         out["ablation"] = abl

@@ -38,6 +38,7 @@ __all__ = [
     "SPLIT_VERSION",
     "HUMAN_LOCKED_VIDEOS",
     "video_split",
+    "template_val_split",
     "split_fingerprint",
     "assert_matches",
 ]
@@ -71,6 +72,64 @@ def video_split(species: np.ndarray, video: np.ndarray, *, frac: float = 1 / 3, 
 
     te = np.array([str(v) in test for v in video])
     return te, sorted(test)
+
+
+def template_val_split(species: np.ndarray, video: np.ndarray, *, n_val: int = 10, seed: int = 0):
+    """Carve a VALIDATION set out of the TEMPLATE videos, for selecting hyper-parameters.
+
+    WHY THIS EXISTS
+    ---------------
+    The descriptor configuration (layer / facet / resolution) must not be chosen using the
+    evaluation videos -- otherwise the reported accuracy is partly a selection effect. `sweep.py`
+    did exactly that: it fitted on the template videos and *scored on the held-out evaluation
+    videos*. This function supplies the honest alternative: a second, video-level split INSIDE the
+    template videos, so the configuration is chosen on data the final evaluation never sees.
+
+    THE RULE, FIXED IN ADVANCE (do not tune it after seeing results)
+    ----------------------------------------------------------------
+    Largest-remainder apportionment of `n_val` validation videos across species, proportional to
+    each species' template-video count, subject to:
+      * a species with >= 2 videos gets >= 1 validation video (so it is represented in both), and
+      * every species keeps >= 1 fit video (so its template can be built at all).
+
+    Callers pass ONLY the template rows (i.e. `species[~te], video[~te]`); passing the whole
+    dataset would leak the evaluation videos straight back in, which is the bug this replaces.
+
+    Returns `(val_mask, fit_videos, val_videos)` -- `val_mask` is over the rows passed in.
+    """
+    spec = sorted(set(map(str, species.tolist())))
+    n_by = {s: len(np.unique(video[species == s])) for s in spec}
+    total = sum(n_by.values())
+    if total == 0:
+        raise ValueError("no template videos to split")
+
+    quota = {s: n_val * n_by[s] / total for s in spec}
+    k = {s: int(np.floor(quota[s])) for s in spec}
+    for s in spec:                                   # represented in validation where possible,
+        if n_by[s] >= 2:                             # and never at the cost of its own template
+            k[s] = max(k[s], 1)
+        k[s] = min(k[s], max(n_by[s] - 1, 0))
+    while sum(k.values()) < n_val:                   # hand out the remainder, largest first
+        c = max((s for s in spec if k[s] < n_by[s] - 1),
+                key=lambda s: quota[s] - k[s], default=None)
+        if c is None:
+            break
+        k[c] += 1
+    while sum(k.values()) > n_val:
+        c = max((s for s in spec if k[s] > 1), key=lambda s: k[s] - quota[s], default=None)
+        if c is None:
+            break
+        c and k.__setitem__(c, k[c] - 1)
+
+    rng = np.random.default_rng(seed)
+    val: set[str] = set()
+    for s in spec:
+        pool = np.array(sorted(np.unique(video[species == s]).tolist()))
+        rng.shuffle(pool)
+        val.update(map(str, pool[: k[s]].tolist()))
+
+    val_mask = np.array([str(v) in val for v in video])
+    return val_mask, sorted(set(map(str, video[~val_mask]))), sorted(val)
 
 
 def split_fingerprint(held_out, *, seed: int) -> dict:

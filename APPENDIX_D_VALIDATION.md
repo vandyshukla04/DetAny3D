@@ -99,34 +99,66 @@ disagree about the winner, that must be reported rather than resolved silently.
 
 ## B. The validation sweep
 
-*Pending the run in §6. Produced verbatim in this format by `sweep_val.py`, and written to
-`sweep_val.json`.*
+Templates for every row built from the **23 fit videos only**; scored on the **10 validation videos**
+(n = 2,027 — one crop abstains, being exactly end-on). The 20 evaluation videos take no part.
 
 | configuration | 2-way | App-4 | Geo | Prior | macro | Ele | Gir | Rhi | Zeb |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| L12/key/448 | | | | | | | | | |
-| L16/key/448 | | | | | | | | | |
-| L18/key/448 | | | | | | | | | |
-| L24/key/448 | | | | | | | | | |
-| L12/token/448 | | | | | | | | | |
-| L24/token/448 | | | | | | | | | |
-| L12/token/224 | | | | | | | | | |
-| L24/token/224 | | | | | | | | | |
+| L12/key/448 | 75.5 | 60.2 | 67.7 | 68.3 | 71.4 | 69.4 | 92.9 | 77.2 | 46.3 |
+| L16/key/448 | 77.1 | 62.3 | 69.3 | 69.1 | 72.6 | 72.9 | 93.2 | 78.0 | 46.3 |
+| L18/key/448 | 75.5 | 60.5 | 67.7 | 64.9 | 71.4 | 70.1 | 93.4 | 75.8 | 46.3 |
+| L24/key/448 | 78.4 | 61.6 | 70.6 | 67.4 | 73.5 | 76.3 | 93.2 | 77.8 | 46.8 |
+| L12/token/448 | 74.9 | 60.6 | 67.4 | 63.2 | 71.3 | 67.7 | 91.2 | 79.1 | 47.3 |
+| **L24/token/448** | **91.8** | 69.7 | 82.7 | 82.9 | **87.8** | 95.3 | 92.0 | 95.9 | 68.2 |
+| L12/token/224 | 75.0 | 60.6 | 67.4 | 63.8 | 71.1 | 68.5 | 91.2 | 78.6 | 45.8 |
+| L24/token/224 | 91.2 | 71.5 | 82.4 | 82.9 | 87.2 | 95.1 | 89.8 | 95.9 | 68.2 |
 
-Templates for every row are built from the **23 fit videos only**; the 10 validation videos contribute
-nothing to any template.
+**The two headline findings survive selection on held-out validation data, and are not marginal:**
+
+- **The last layer wins, decisively.** L24/token beats L12/token by **~17 points** (91.8 vs 74.9 at
+  448; 91.2 vs 75.0 at 224). The mid-layer prior was wrong, and this is now demonstrated without the
+  evaluation videos.
+- **The `token` facet beats `key`, decisively.** At layer 24: 91.8 (token/448) vs 78.4 (key/448), a
+  **13-point** gap. On zebra alone the gap is **68.2 vs 46.8** — below chance for `key`.
+
+Both effects are far larger than the resolution effect, so the paper's central claim about layer and
+facet is unaffected by which resolution is chosen.
 
 ---
 
 ## C. Selected configuration
 
-*Pending.*
+```
+Selected:         L24/token/448
+Selection metric: overall (crop-weighted) validation 2-way accuracy = 91.8%  (n = 2,027)
+Ties:             lower resolution, then lower layer  — not invoked
+```
 
-```
-Selected:         <config>
-Selection metric: overall (crop-weighted) validation 2-way accuracy
-Ties:             lower resolution, then lower layer
-```
+**This is not the configuration the manuscript uses.** The incumbent, L24/token/224, comes second at
+91.2%.
+
+### Reporting this honestly
+
+The margin is **0.6 points on 2,027 paired observations** — roughly a dozen crops net, which is well
+inside sampling noise. It would be easy to argue for keeping 224. Three reasons the report selects 448
+anyway:
+
+1. **The rule was fixed before the table was seen**, and says "highest overall 2-way", with a tie-break
+   only for an *exact* tie. Adding a tolerance now — after seeing that 224 loses by less than it — is
+   the same class of error as the original criticism. The rule stands.
+2. **448 also wins the macro average** (87.8 vs 87.2), so the choice is not an artefact of the
+   crop-weighting imbalance flagged in §A. That was the one thing that could have made the criterion
+   untrustworthy, and it does not apply.
+3. The manuscript's own claim — that 224 and 448 are "within a point" — is **confirmed** by this table
+   (0.6 pt). What changes is only which of the two is selected, not the finding that they are close.
+
+Note that **zebra (68.2) and rhino (95.9) are identical** at both resolutions; the entire 0.6-point
+difference comes from giraffe (92.0 vs 89.8) and elephant (95.3 vs 95.1) — and giraffe is the species
+whose template is built from a single video (§A). That is worth one sentence in the appendix, because
+it means the selected resolution is being decided by the weakest species in the split.
+
+**Consequence:** all appearance-dependent results must be regenerated at 448 (§D). The efficiency
+argument for 224 can still be made in the text — as a deployment note, not as the selection criterion.
 
 ---
 
@@ -135,16 +167,102 @@ Ties:             lower resolution, then lower layer
 Templates rebuilt from **all 33 template videos** (1,500-crop sample, exactly as the method operates),
 then evaluated **once** on the 20 evaluation videos.
 
-*Pending. Format as requested:*
+### D.1 Reference run — the incumbent L24/token/224 (`REPORT_v4`, fp32)
+
+Not the selected configuration, but run in parallel with the sweep and reported so the effect of the
+change is visible. All values reproduce the manuscript.
 
 ```
-Walking:
-  appearance axis given =        full heading =        @30 =        median =        flank =    / coverage
-Stationary:
-  appearance axis given =        full heading =        @30 =        median =        flank =    / coverage
-Manual zebra:
-  appearance axis given =        full heading =                                     flank =    / coverage
+Walking:      appearance axis given = 93.4%   full heading = 87.4%   @30 = 83.8%   median =  9.84°   flank = 95.0% / coverage 77.5%
+Stationary:   appearance axis given = 79.3%   full heading = 69.1%   @30 = 66.0%   median = 15.16°   flank = 89.4% / coverage 69.2%
+Manual zebra: appearance axis given = 94.3%   full heading = 92.5%   @30 = 92.5%   median =  0.00°   flank = 97.1% / coverage 95.3%
 ```
+
+Quantisation ceiling (locomotion reference): walking median **9.08°**, @30 **94.1%**; stationary
+**8.50°**, @30 **89.5%**; manual zebra **0.00°**, @30 **100%**.
+
+### D.2 ⚠️ The manual-zebra angular columns are DEGENERATE — do not quote them
+
+`median = 0.00°` and `@30 = 92.5% = sign` exactly, on every row. This is not a bug and not a
+suspiciously good result. On the human set the reference is a **human face-lock**, i.e. the annotator
+labelled *which box face is the front*. The reference direction is therefore **itself one of the four
+candidates the method chooses from**, so the angular error can only ever read 0° (right face) or ~180°
+(wrong face). Median is 0 whenever accuracy exceeds 50%, and `@30 ≡ @45 ≡ directed-candidate accuracy`.
+
+This is the cleanest possible illustration of the point in reviewer comment 1:
+
+| test set | angular reference | candidate reference | are they distinct? |
+|---|---|---|---|
+| walking | continuous motion direction | its nearest candidate | **yes** — 9.08° apart |
+| stationary | continuous direction carried across the stop | its nearest candidate | **yes** — 8.50° apart |
+| **manual zebra** | the human-locked **face** | the same face | **no** — 0.00° apart |
+
+So the manuscript should report angular error for walking and stationary only, and state explicitly
+that it is undefined-by-construction on the human set. Reporting a 0.00° median there would look like
+an error to any careful reader — and reporting `@30` there is just directed-candidate accuracy under
+another name.
+
+### D.3 Selected configuration — L24/token/448 (`REPORT_v5`, fp32)
+
+Templates rebuilt from all 33 template videos (1,500-crop sample), evaluated once on the 20 evaluation
+videos. **This is the result of record.**
+
+```
+Walking:      appearance axis given = 93.0%   full heading = 87.1%   @30 = 83.5%   median =  9.90°   flank = 95.1% / coverage 77.5%
+Stationary:   appearance axis given = 78.8%   full heading = 68.9%   @30 = 65.7%   median = 15.30°   flank = 91.6% / coverage 69.2%
+Manual zebra: appearance axis given = 94.7%   full heading = 92.9%                                   flank = 97.6% / coverage 95.3%
+```
+
+(Manual-zebra angular columns omitted deliberately — degenerate by construction, §D.2.)
+
+### D.4 What changed relative to the manuscript's L24/token/224
+
+| | 224 | **448 (selected)** | Δ |
+|---|---:|---:|---:|
+| **walking** — appearance, oracle axis | 93.4 | 93.0 | −0.4 |
+| **walking** — full heading (sign) | 87.4 | **87.1** | −0.3 |
+| **walking** — flank | 95.0 | **95.1** | +0.1 |
+| **walking** — median / @30 | 9.84° / 83.8 | 9.90° / 83.5 | +0.06° / −0.3 |
+| **stationary** — full heading | 69.1 | **68.9** | −0.2 |
+| **stationary** — flank | 89.4 | **91.6** | **+2.2** |
+| **manual zebra** — full heading | 92.5 | **92.9** | **+0.4** |
+| **manual zebra** — flank | 97.1 | **97.6** | **+0.5** |
+| transfer gap (sign / flank) | −18.3 / −5.6 | −18.2 / **−3.5** | flank gap narrows |
+
+**Every qualitative claim in the paper survives, and the deliverable improves.** Sign accuracy is
+0.2–0.4 pt lower; **flank accuracy — the tag the downstream task actually consumes — is equal or better
+on all three test sets**, and the walking→stationary flank gap narrows from 5.6 to 3.5 points.
+
+Ablation (walking sign), ordering and interpretation unchanged, gaps slightly larger:
+
+| | 224 | **448** |
+|---|---:|---:|
+| full method | 87.4 | **87.1** |
+| − centring | 87.3 | **86.6** |
+| − SAM instance mask | 86.6 | **85.6** |
+| − geometric axis prior | 83.6 | **82.4** |
+
+> One interpretation does need softening. At 224, removing centring cost 0.1 pt, supporting the claim
+> that centring and the geometric axis prior are *redundant*. At 448 it costs **0.5 pt**, and removing
+> the SAM mask costs **1.5 pt** rather than 0.8. The components are less redundant at higher
+> resolution — sensible, since finer patches make both the along-body gradient and a neighbour's
+> intruding patches more resolvable. State the ablation as measured; drop the strong "redundant"
+> phrasing.
+
+Per species (walking, sign): elephant 77.1 · giraffe 100 (n=30) · rhino 91.8 · **zebra 72.1** (was
+73.7). Zebra is the one species that is *worse* at 448 — the only place the resolution change costs
+anything material, and worth a sentence given zebra carries the layer/facet argument.
+
+Viewing-angle bands, walking: 74.4 / 91.5 / 90.1 (sign), 79.6 / 94.8 / 95.4 (flank).
+Manual zebra: **the broadside band is identical at both resolutions — 96.4 sign / 98.4 flank on
+n=4,702**. The headline "98.4% on the frames that matter" is unchanged by the selection.
+
+### D.5 One incidental change worth a footnote
+
+**At 448 there are no abstentions: n = 5,768 on every row.** At 224 exactly one crop was exactly end-on,
+its body axis projected to a point, and the appearance rows reported n = 5,767. At 448 that crop has
+enough patches to form a profile. If the manuscript explains the 5,768 → 5,767 discrepancy, that
+sentence is no longer needed for the selected configuration.
 
 > **Note on `@30` and `median`.** These columns were removed from `metrics()` in July (`165eb2f`) as
 > redundant — `acc@45` is bit-identical to directed-candidate accuracy on all 14 rows, because the
@@ -181,6 +299,25 @@ Details, for the manuscript sentence:
 So "uses supervision" should be replaced with the sentence above. The important clarification is that
 the supervision is the **motion-derived α**, not a human label — the MLP is a supervised *baseline
 against the same free labels*, which is what makes it comparable to the training-free method.
+
+---
+
+## Summary — what the manuscript must change
+
+| # | change | why |
+|---|---|---|
+| 1 | Appendix D: report the **validation** sweep (§B), not the evaluation-set sweep | the criticism |
+| 2 | Selected configuration becomes **L24/token/448** | the predefined rule |
+| 3 | All appearance-dependent numbers → `REPORT_v5` (§D.3, §D.4) | configuration changed |
+| 4 | "40 non-evaluation videos" → "40, of which **33** contribute walking anchors" | 7 yield no crops |
+| 5 | Drop the strong "centring and the axis prior are redundant" phrasing | gap is 0.5 pt at 448, not 0.1 |
+| 6 | State that manual-zebra angular error is **undefined by construction**; report sign/flank only | §D.2 |
+| 7 | Remove the 5,768→5,767 abstention sentence for the selected configuration | no abstentions at 448 |
+| 8 | Replace "the MLP uses supervision" with the sentence in §E | ambiguous as written |
+| 9 | Keep the efficiency argument for 224 as a **deployment note**, not a selection criterion | it is 4× cheaper and statistically indistinguishable — but that cannot decide the choice after the fact |
+
+Unchanged: the method, the three-signal argument, the last-layer and `token`-facet findings (17 and 13
+points on validation), the transfer result, and the 98.4% broadside flank figure on the human set.
 
 ---
 
@@ -239,11 +376,29 @@ PYTHONUNBUFFERED=1 python -m tools.heading.experiments \
     2>&1 | tee data/heading/exp_v4.log
 ```
 
-### Then
+### Job 3 — the final evaluation at the SELECTED configuration **[A40, ~1.5–2.5 h]**
 
-- **If the sweep selects L24/token/224** — Job 2 *is* section D. Nothing further to run.
-- **If it selects anything else** — rerun Job 2 once with `--layer/--facet/--size` set to the winner,
-  into `REPORT_v5`, and regenerate the four downstream tables from it.
+The sweep selected **L24/token/448**, so this run is required: it is section D.
+
+```bash
+conda activate /storage3/3DOM/vshukla/envs/dinov3
+PYTHONUNBUFFERED=1 python -m tools.heading.experiments \
+    --crops       data/heading/crops.npz \
+    --stand-crops data/heading/crops_stand.npz \
+    --human-crops data/heading/crops_human.npz \
+    --out         data/heading/REPORT_v5/exp \
+    --layer 24 --facet token --size 448 \
+    --device cuda --dtype fp32 --batch 48 \
+    2>&1 | tee data/heading/exp_v5.log
+```
+
+448 px is 784 patch tokens against 196, so attention cost rises ~16× per image and the run is several
+times longer than the 224 one. Use the **A40** (more memory and faster at this size) and `--batch 48`;
+if it OOMs, drop to 32. Everything else — the split, the fit-set size, the crops — is identical to
+Job 2, so the two runs differ **only** in resolution.
+
+Templates are rebuilt from all 33 template videos, exactly as in the final method; the fit/validation
+distinction used for selection is discarded at this point, as intended.
 
 ### Send back
 

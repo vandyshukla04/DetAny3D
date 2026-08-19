@@ -827,17 +827,33 @@ wrong and would set up a misleading experiment.** Four reasons:
    forward (the frozen DINOv3 template, ~356 crops/s @224). Our head emits alpha inside the detector's own
    forward pass. Matching ~90% while collapsing two stages into one is a win, not a shortfall.
 
-**Use this ladder instead:**
-| level | value | meaning |
-|---|---|---|
-| chance floor — sign | **45.7%** (NOT 50: a coin on the geometry-proposed axis cannot hit a head on the other axis) | below this the head learned nothing |
-| chance floor — flank L/R | 50% | |
-| **first-experiment success** | **sign meaningfully >45.7%** on held-out human locks, with the label-free flank-switch rate not rising | proves a monocular head can learn orientation at all from 5.4% masked supervision |
-| notable | sign ≳80% | within striking distance of the teacher WITHOUT a 3D box at inference |
-| ceiling (teacher) | 92.5 / 97.1 | the eventual target if we later add the distillation pass |
+**⚠ THE LADDER BELOW WAS REPLACED ON 2026-08-19. The 45.7% figure is NOT the student's floor** — it belongs
+to the held-out WALKING split under a box-restricted 4-way decision (`METHOD.md:340`). **Use these MEASURED
+floors instead** (all computed by fitting the best constant alpha on TRAIN and transferring — an eval-fitted
+constant is an ORACLE and is never a valid floor):
 
-Grade ONLY with flip-SENSITIVE metrics (sign/flank vs human locks; label-free flank-switch rate). NHD, 3D IoU
-and BEV are **invariant to 180° flips** and cannot measure orientation at all.
+| grader | n | **TRAIN-TRANSFERRED constant floor** | notes |
+|---|---:|---|---|
+| val labels **per species — elephant** | 1,666 (75 tracks) | eval-fitted 77.2 sign / 71.4 flank | **informative** |
+| val labels **per species — zebra** | 1,294 (53 tracks) | eval-fitted 74.7 / 72.6 | **informative** |
+| val labels **per species — rhino** | 4,500 (80 tracks) | eval-fitted **98.3** / 81.0, R=0.847 | ⚠ **cannot carry a result** |
+| val labels, POOLED | 7,460 | **87.9 / 77.4** | ⚠ **NEVER pool** — 60% rhino saturates it |
+| val, **track-balanced** (1/track) | **208** | eval-fitted 76.4 / 67.3 | the honest effective n |
+| **gold locks (SECONDARY)** | 5,542 (66 tracks) | **35.2 / 34.1** | "labels held out, IMAGES SEEN" |
+| ceiling (teacher, zebra only) | 5,542 | 92.5 sign / 94.2 flank all / 97.1 flank on \|sin a\|>=0.35 | not a first-experiment bar |
+
+**Success = held-out sign accuracy beats the TRAIN-TRANSFERRED constant on that exact set by more than the
+track-clustered 95% CI**, reported per species and band-resolved by `|sin alpha|`. Design effect ~7x =>
+**no gap under ~5 points is real.** A degenerate constant-alpha head passes every criterion the old ladder
+stated, which is why the old ladder is withdrawn.
+
+Grade ONLY with flip-SENSITIVE metrics. NHD, 3D IoU and BEV are **exactly invariant to 180 deg flips**
+(verified: min BEV IoU **1.000** over 3000 random boxes, 8-corner set identical to 6.3e-16, with a 90 deg
+control at IoU 0.333 proving the test has power) and cannot measure orientation at all.
+⚠ Also flip-BLIND, so NOT usable as falsifiers: the label-free flank-switch count (bit-identical for the truth
+and for a 180-inverted prediction) and the E7 re-ID AUC (a uniform relabel of query and gallery changes no
+score). The ONE flip-sensitive multi-species channel is **alpha vs motion-derived heading on held-out videos** —
+that is the primary grader.
 
 ---
 

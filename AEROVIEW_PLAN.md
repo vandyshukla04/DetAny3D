@@ -129,7 +129,7 @@ shows *which* component a fix moved. Plus a **pairwise depth-ordering AUC** (sca
 not — the quantitative zoom-robustness claim).
 
 **Orientation + visibility (Part 2, the objective):** sign and flank accuracy vs the 5,542 human-locked
-instances — **the bar is the existing pipeline, 92.5 / 97.1**. Per-side visibility P/R/F1/κ/ROC-AUC on the
+instances — **the teacher/CEILING is 92.5 / 97.1 — see the success-criteria ladder at the end; it is NOT the first-experiment bar**. Per-side visibility P/R/F1/κ/ROC-AUC on the
 512 human-labelled frame-sets via the existing `visibility.ConfusionMatrixEvaluator:583`. Angular error and
 acc@15/30 vs motion on held-out videos (pipeline: 87.4/95.0 walking, 69.1/89.4 standing), band-resolved by
 `|sin α|`.
@@ -795,3 +795,27 @@ Two consequences for the implementation:
    labelled instances, leaving the existing pose loss untouched, and grade it with a **flip-SENSITIVE**
    metric (sign/flank accuracy vs the human locks; the label-free flank-switch rate) — never with NHD/BEV,
    which are flip-blind by construction.
+
+
+## 🎯 SUCCESS CRITERIA for the orientation head — 92.5/97.1 is the CEILING, not the bar
+An earlier draft called the heading pipeline's **92.5% sign / 97.1% flank** "the bar to beat". **That is
+wrong and would set up a misleading experiment.** Four reasons:
+1. **Different inputs.** The pipeline is HANDED the WildBox 3D box, so geometry restricts the answer to
+   **4 candidates** and appearance only resolves which end is the head. Our head sees an image, with no box.
+2. **It is the TEACHER.** The head is trained on labels this pipeline produced; a distilled student is
+   normally capped by its teacher, so "beat the teacher" is not a first-experiment criterion.
+3. **It is zebra-only** — 5,542 human-locked instances from 2 videos; not multi-species.
+4. **Different job.** The pipeline requires a 3D reconstruction at inference; the detector does not.
+   Matching it at ~90% while REMOVING that dependency is a win, not a shortfall.
+
+**Use this ladder instead:**
+| level | value | meaning |
+|---|---|---|
+| chance floor — sign | **45.7%** (NOT 50: a coin on the geometry-proposed axis cannot hit a head on the other axis) | below this the head learned nothing |
+| chance floor — flank L/R | 50% | |
+| **first-experiment success** | **sign meaningfully >45.7%** on held-out human locks, with the label-free flank-switch rate not rising | proves a monocular head can learn orientation at all from 5.4% masked supervision |
+| notable | sign ≳80% | within striking distance of the teacher WITHOUT a 3D box at inference |
+| ceiling (teacher) | 92.5 / 97.1 | the eventual target if we later add the distillation pass |
+
+Grade ONLY with flip-SENSITIVE metrics (sign/flank vs human locks; label-free flank-switch rate). NHD, 3D IoU
+and BEV are **invariant to 180° flips** and cannot measure orientation at all.

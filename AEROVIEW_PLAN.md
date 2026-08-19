@@ -980,3 +980,54 @@ That is a real collapse of the two-stage pipeline into one forward pass.
 **Herd visibility is NOT delivered and is not even specified**: every output is per-animal; there is no per-frame
 aggregate anywhere — no herd count, no fraction-of-herd-usable, no coverage/duty statistic, no who-blocks-whom
 edge list, no metric that scores a FRAME rather than an INSTANCE. Either specify one or drop the word "herd".
+
+---
+
+# VISUALIZATION PLAN — how we verify detection + heading on real images
+
+**Tool:** `ovmono3d/tools/aeroview/viz_heading.py`. Two modes; the second is the one that actually works.
+
+```
+# GT only (runs today, no model needed)
+python tools/aeroview/viz_heading.py \
+    --gt /mnt/d/aeroview/labelled/WildBox_val_paper.json \
+    --image-root /mnt/d/3DBOX/papersubdata \
+    --video <VIDEO> --n 14 --crops --out /mnt/d/aeroview/viz_<name>
+
+# GT vs a trained model: add
+    --preds <run>/eval/inference/iter_final/WildBox_val/instances_predictions.pth --score-thresh 0.25
+```
+
+**Why it exists.** NHD / 3D IoU / BEV AP are EXACTLY 180-flip-blind, so a systematic head/tail inversion is
+invisible to the entire evaluation stack. The only way to catch it early is to look. Green = GT, magenta =
+prediction, **arrowhead = the HEAD**.
+
+**Full-frame mode is for context only.** Animals are ~142 px in 1920x1080, so a heading is not legible at
+frame scale. **`--crops` emits a per-animal contact sheet** (zoomed, `--crop-pad` x the box) and that is the
+mode to verify with.
+
+**Reading rule.** Arrows with `|sin alpha| < 0.35` are drawn DASHED and titled `END`. Near end-on the flank
+bit is degenerate — **never score a left/right disagreement on a dashed arrow as an error.** A real failure
+looks like SOLID arrows pointing at tails across many animals.
+
+**Two things the tool does NOT need — this is the point.** No VGGT artefact, no `cameras.json`, no
+`tracking_summary.json`. `up` is recovered exactly from the annotation itself: Omni3D stores `dims=[W,H,L]`
+with H on the box's local Y, so `R_cam[:,1]` IS the vertical axis — **measured over 2,491 val frames, every
+box in a frame agrees to 0.00 degrees.** For predictions the same field is read off the predicted `pose`.
+
+**The projection is the part that is easy to get wrong.** alpha is ALLOCENTRIC, so it does not map to a fixed
+image angle — the same alpha points differently depending on where the animal sits in frame. Recover the 3D
+direction first, then differentiate the projection:
+`r` = horizontal ray to the animal, `s = up x r`, `d = cos(a) r + sin(a) s`, and
+`image_dir ~ ( fx (d_x - (p_x/p_z) d_z), fy (d_y - (p_y/p_z) d_z) )`.
+Treating alpha as a raw image angle is wrong everywhere except the principal point.
+
+**GT VALIDATED BY EYE (2026-08-19, rhin `DJI_20250218175311_0031_D`, 25 animals).** Every solid arrow lands on
+the animal's head — left-facing rhinos get left arrows with the horn on the arrow side; dashed cases point up
+the frame, i.e. walking away, correct for rear views. So both the pipeline's alpha labels and this projection
+are confirmed correct. **It also makes the rhino degeneracy visible:** nearly every solid arrow points left and
+is labelled `R` — that is the R=0.847 concentration that lets a constant score 98.3% on rhino val.
+
+**Use it at three points:** (1) NOW on GT, as a label audit per species; (2) immediately after the first
+training run, GT vs prediction on the same frames — look for solid arrows pointing at tails; (3) on the
+held-out val species, since a systematic inversion there is exactly what the flip-blind metrics cannot report.

@@ -36,7 +36,7 @@ one, so this is domain adaptation, not a grab-bag.
 |---|---|---|
 | objects span many patches | median animal **142 px** natively [CORRECTED — and note **giraffe is SMALLER than elephant**, not larger] — but `SQUARE_PAD: 560` shrinks 1920→560, leaving **55% under 3×3 DINOv2 patches** | **native-resolution crop stream** (336 px at context ×2.5 ⇒ ~9.6 patches/animal, capped 32 crops/iter). Cheaper *and* sharper than upscaling the whole frame, since animals occupy 6.8% of width |
 | depth ranges ~100× | within a segment depth spans **±10–20%**; absolute is unidentifiable (GT normalised to median 1.0, `prepare_wildbox_dataset.py:393-406`) | **predict depth relative to the scene**, `z = z̃·exp(δ)` anchored at the frame median, δ bounded. Model *starts at* the strongest trivial baseline and learns residuals |
-| calibrated intrinsics | VGGT `fx` spans **10.9×** (1011–11055), varies 1.4–2.6× *within one video*, r=0.49 with true zoom, `cx,cy` pinned to image centre | **give K to the head as an input** — it is currently blind to box size and focal length (`roi_heads.py:366/430`), so it structurally cannot express `z = f·L/s`. Keep K in the *xy* decode (`roi_heads.py:802-803`), which works (NHD-xy = 2.1) |
+| calibrated intrinsics | VGGT `fx` spans **10.9×** (1011–11055), varies **1.5× median and up to 3.4×** *within one video*, r=0.49 with true zoom, `cx,cy` pinned to image centre | **give K to the head as an input** — it is currently blind to box size and focal length (`roi_heads.py:366/430`), so it structurally cannot express `z = f·L/s`. Keep K in the *xy* decode (`roi_heads.py:802-803`), which works (NHD-xy = 2.1) |
 | rigid objects, CAD-like size priors | deformable animals, 6 species; `DIMS_PRIORS` is **off**, so dims initialise at 1.0 vs GT ≈ 0.03 — a **33× error** | enable per-species dimension priors; normalise the disentangled losses by the GT cuboid diagonal (training currently uses absolute units while eval normalises) |
 
 **Backbone.** Swap DINOv2 → **DINOv3** (stronger dense features, Gram anchoring) — as an ablation arm, not
@@ -54,7 +54,8 @@ autocast/GradScaler, so `SOLVER.AMP.ENABLED: True` does nothing); the loader ran
 **Orientation is currently unsupervised.** DetAny3D's yaw target for WildBox is the literal constant `0.0`
 (`wildbox.py:270`, "yaw placeholder"), so its existing α head (12 bins + residual,
 `mask_decoder.py:116/165`; loss live at `train.py:170-182`) learns pure ray-angle. And WildBox's own box
-rotations come from PCA with **arbitrary signs — 12.4% of consecutive frames flip** — so they are an
+rotations come from PCA with **arbitrary signs — the horizontal body axis flips on 10.9% of consecutive
+annotated same-track frame pairs** (236,027 pairs) — so they are an
 *unsigned axis* and must **never** be used as heading supervision.
 
 1. **Supervise α for real**, from labels the heading project already produces (below). One-line change in
@@ -77,7 +78,7 @@ orientation. We fix depth as far as it is fixable (Part 1) and grade the system 
 
 | source | size | role |
 |---|---|---|
-| **Template teacher** (frozen DINOv3 heading pipeline: α + `margin`) | **177,973 images, 60 videos, 4 species** | primary α target; `margin` = per-sample confidence weight |
+| **Template teacher** (frozen DINOv3 heading pipeline: α + `margin`) | **177,973 animal instances across 52,443 frames**, 60 videos, 4 species (NO gazelle) | primary α target; `margin` = per-sample confidence weight |
 | **Motion-derived heading** (`autolabel.label_track`, gated) | 25,554 images (14%) + 4,833 standing (`bridges.py`) | free and appearance-independent — the reason the student can *exceed* the teacher |
 | **Geometric visibility teacher** (`n·v`, ray-OBB occlusion, SAM-mask overlap; deterministic) | any frame with boxes + camera + masks | visibility-head target |
 | **Human face locks** (66 tracks, 2 zebra videos) | 11,084 instances | **gold — held out, never trained on** |
@@ -135,7 +136,7 @@ acc@15/30 vs motion on held-out videos (pipeline: 87.4/95.0 walking, 69.1/89.4 s
 
 **Label-free, all species:** the **impossible-flank-switch** count (`viewpoint.py:181-192`) — a flank can
 only flip through end-on, so a switch with `|sin α| > 0.35` on both sides is provably wrong. No ground truth
-needed; runs on all 177,973 images including species with no labels.
+needed; runs on all 177,973 animal instances including species with no labels.
 
 **Downstream:** rerun `reid_openset_loso.py` with the model's `view_code`; target the pipeline's **+0.117
 open-set AUC / +21.3 TAR@FAR=0.1**.
@@ -175,7 +176,7 @@ four candidates, median 0.00° by construction); `acc45` (≡ sign bit-for-bit);
   E4 can exceed it. Report student-vs-teacher on held-out locks either way.
 - **The teacher is zebra-validated only** (locks cover 2 zebra videos). For elephant/rhino/giraffe the only
   checks are motion agreement and the label-free switch rate. Say so plainly.
-- **Never train orientation on WildBox `rotation_matrices`** — arbitrary PCA signs, 12.4% frame-to-frame flips.
+- **Never train orientation on WildBox `rotation_matrices`** — arbitrary PCA signs, 10.9% frame-to-frame flips.
 - **Landmines to carry verbatim:** `--dtype fp32` (fp16 silently zeroed the ViT-L forward *and still produced
   a plausible number*); `papersub.Segment.scale` (518-space boxes vs full-res intrinsics — once gave "91.8%
   flank accuracy from a model that had never seen an animal"); the raw-vs-canonical rotation join

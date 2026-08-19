@@ -123,10 +123,15 @@ KITTI/nuScenes, and no metric claim may be made.
 **The real caveat is GT provenance, not scale.** Boxes are pseudo-labels (VGGT+SAM3+PCA) with known biases
 (aspect ratios collapse to ~2.3:1; giraffe l/h measured **1.59** [CORRECTED from 2.5–2.9]; per-frame dims are
 unstable — median within-track relative-std **0.21**, NOT "62% frozen" [CORRECTED]). So
-*dimension* accuracy against them partly measures agreement with VGGT. Crucially, **the orientation and
-visibility targets are not VGGT-derived**: human face locks (11,084), human visibility labels (512
-frame-sets), and motion-derived heading (25,554, from trajectory direction — far more robust than box shape).
-That is why Part 2 rests on firmer ground than Part 1.
+*dimension* accuracy against them partly measures agreement with VGGT. The orientation/visibility targets are
+**LESS** VGGT-derived than the boxes — human face locks (**5,542** [CORRECTED from 11,084]), human visibility
+labels (512 frame-sets), and motion-derived heading (25,554, from trajectory direction — far more robust than
+box shape) — **but they are NOT free of VGGT.** ⚠ [CORRECTED 2026-08-19] The earlier claim "the orientation and
+visibility targets are not VGGT-derived" is WITHDRAWN: the allocentric BASIS in which every alpha is expressed
+(`Segment.allocentric_basis`, `papersub.py:214`) rests on a per-segment `up` consensus fitted over VGGT box
+rotations (`papersub.py:131-140`). See the VGGT circularity ledger in the AUDIT VERDICT section.
+Part 2 still rests on firmer ground than Part 1 — the head/tail decision and the motion direction are genuinely
+independent of VGGT — but the basis is a shared, fourth circularity channel.
 
 **External validation for the Part-1 claims.** Because WildBox cannot adjudicate metric geometry, validate
 the domain-adaptation fixes on an aerial benchmark with **real metric GT**: **AM3D-Real** (DJI M300, 40–80 m)

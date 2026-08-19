@@ -758,3 +758,40 @@ head turns out to be data-limited rather than bias-limited.
    the meta *next to the config* (`train_net.py:411`). This is the documented footgun that once produced
    silently wrong per-class metrics. Fix:
    `ln -sfn category_meta_wildlife6.json configs/wildbox/category_meta.json`
+
+---
+
+# ✅ E0 VALIDATION PASSED on the cluster (V100, 2026-08-19)
+`--eval-only` with `datasets/wildbox_hf/checkpoints/ovmono3d_lift_init5sp_seed0/model_final.pth`
+reproduced the published seed0 artefacts essentially exactly:
+
+| metric | published seed0 | cluster run | Δ |
+|---|---:|---:|---:|
+| 2D AP | 39.614 | **39.623** | 0.009 |
+| 3D AP | 12.412 | **12.416** | 0.004 |
+| overall NHD | 7.065 | **7.064** | 0.001 |
+| disent xy / z / dims / pose | 2.209 / 5.970 / — / — | **2.211 / 5.970 / 0.776 / 0.547** | ~0 |
+
+Per-class 2D also matches (giraffe 19.29, grevys 28.47, elephant 56.25, plains 44.14, rhino 49.12,
+gazelle 40.47). **The full chain is validated: image root symlinks, 6-class category_meta, checkpoint, env,
+config.** Eval fits comfortably on a 16 GB V100; runtime ≈ 16 min (the 2D COCO pass dominates at 824 s).
+
+**Depth dominance re-confirmed on this run:** disent_z 5.970 / overall 7.064 = **84.5%** — exactly the
+init5sp-seed0 figure the audit measured. xy is only 2.211, i.e. the xy decode works and depth is the problem.
+
+## 🔴 CRITICAL DESIGN CONSEQUENCE THE E0 RUN EXPOSED — read before writing any code
+`disent_pose_NHD = 0.547`, the SMALLEST of the four components. That looks like "pose is already solved".
+**It is not — the metric cannot see orientation error.** NHD, 3D IoU and BEV AP are all **invariant to a
+cuboid's 180° flip**, so a box pointing exactly backwards scores identically to a correct one. This is
+precisely why nobody noticed the pose head learns nothing about *direction*.
+
+Two consequences for the implementation:
+1. **In cubercnn there is NO α head** (that is DetAny3D). Orientation lives in `bbox_3D_pose` (6D rotation),
+   supervised by the annotations' `R_cam` — which carries **arbitrary PCA signs (10.9% frame-to-frame flips)**.
+   So the pose target is sign-ambiguous, and the loss cannot teach direction.
+2. Therefore **do NOT try to fix orientation by re-signing `R_cam`** for the 5.4% labelled subset — that
+   leaves 94.6% of instances still supplying sign-arbitrary targets, i.e. actively conflicting supervision.
+   **Add a separate, small, MASKED orientation output** (a sign/α head) trained ONLY on the 12,762 heading-
+   labelled instances, leaving the existing pose loss untouched, and grade it with a **flip-SENSITIVE**
+   metric (sign/flank accuracy vs the human locks; the label-free flank-switch rate) — never with NHD/BEV,
+   which are flip-blind by construction.

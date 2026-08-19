@@ -1022,11 +1022,33 @@ direction first, then differentiate the projection:
 `image_dir ~ ( fx (d_x - (p_x/p_z) d_z), fy (d_y - (p_y/p_z) d_z) )`.
 Treating alpha as a raw image angle is wrong everywhere except the principal point.
 
-**GT VALIDATED BY EYE (2026-08-19, rhin `DJI_20250218175311_0031_D`, 25 animals).** Every solid arrow lands on
-the animal's head — left-facing rhinos get left arrows with the horn on the arrow side; dashed cases point up
-the frame, i.e. walking away, correct for rear views. So both the pipeline's alpha labels and this projection
-are confirmed correct. **It also makes the rhino degeneracy visible:** nearly every solid arrow points left and
-is labelled `R` — that is the R=0.847 concentration that lets a constant score 98.3% on rhino val.
+**⚠ THE FIRST VERSION OF THIS TOOL DREW EVERY ARROW BACKWARDS, AND I "VALIDATED IT BY EYE" AND SAID IT WAS
+CORRECT. The user spotted it; my eyeballing did not.** Root cause: `up` sign (see above). What makes this the
+single most instructive bug in the project — the printed flank label is computed from `sin(alpha)` DIRECTLY and
+was always right, while the arrow used the reconstructed basis and was inverted. So the picture disagreed with
+its own caption, and every by-eye check I ran simply mis-read which end of a rhino was the head.
+
+**THE OBJECTIVE TEST — always run this instead of eyeballing.** Geometrically `left = up x forward`, so a
+visible LEFT flank forces the head to project image-LEFT (for a camera whose up is image-up, near the
+principal point). Therefore `sign(u_x)` from the projected arrow MUST agree with the printed flank label:
+
+| up convention | agreement, all 7,460 | agreement, usable \|sin a\|>=0.35 (n=5,358) |
+|---|---:|---:|
+| `up = -R_cam[:,1]` (**correct**) | **99.8%** | **100.0%** |
+| `up = +R_cam[:,1]` (the bug) | 0.3% | 0.0% |
+
+0.0% vs 100.0% — this test is decisive and takes seconds. **Never accept a heading render on eyeballing again.**
+
+**THE 2D BOXES WERE NEVER WRONG** (also investigated, also on user report). Two independent checks:
+`bbox` is XYWH and reproduces `bbox2D_tight` exactly (maxdiff 0.0); and the 2D box centre matches the
+projected 3D centre to a **median 9.6 px = 6.1% of box size, 95.4% within 25%** over all 66,951 annotations.
+The apparent misalignment was a RENDERING CHOICE: only ~11% of val annotations carry a heading label, so
+drawing labelled animals alone left most animals in a frame unboxed and the eye landed on an unboxed
+neighbour. One case that looked badly offset was a labelled rhino CALF with the unlabelled adult beside it.
+Fixed by drawing every other annotated animal dim-blue as context (`--no-context` to disable).
+
+**Still true and still visible:** the rhino degeneracy — nearly every solid arrow in a val rhino sheet points
+the same way, which is the R=0.847 concentration that lets a constant score 98.3% on rhino val.
 
 **Use it at three points:** (1) NOW on GT, as a label audit per species; (2) immediately after the first
 training run, GT vs prediction on the same frames — look for solid arrows pointing at tails; (3) on the

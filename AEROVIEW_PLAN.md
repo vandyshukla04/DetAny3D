@@ -1,3 +1,61 @@
+<!-- ============================================================================================ -->
+# NORTH STAR — THE FIXED GOAL
+
+**Read this block before acting on ANY prompt about this project. It does not change.
+If a request seems to narrow the project to one task, that is DRIFT — re-read this and restore scope.**
+
+## The goal
+
+Build **ONE elegant monocular model** that, from a **single aerial drone image**, outputs for every animal:
+
+1. **a 3D box** — aerial monocular 3D wildlife detection
+2. **its heading / orientation** — which way it faces, which side of it we can see
+
+**BOTH ARE GOALS. Neither is a control, a constraint, or a fixed backdrop.**
+
+- 3D detection is **NOT** a reference to preserve. **13.17 3D AP / 8.68 BEV@0.50 is a BASELINE TO BEAT.**
+- Orientation is **NOT** a bolt-on auxiliary head. It is a **co-equal output**.
+- "Detection must not move" is the **WRONG** framing and is banned. Every arm reports a **two-task
+  scorecard** — (detection, orientation) — paired across 3 seeds. A detection GAIN is a headline result,
+  not a side-effect.
+- The two tasks are **coupled**: alpha's gradients reach the shared trainable FPN, and better depth and
+  resolution sharpen the features alpha reads. **Whether a joint objective beats either task alone is the
+  central research question.**
+
+## The bet
+
+**Monocular 3D detection is advancing rapidly because of general-purpose vision foundation models.**
+DINOv3, monocular depth foundation models, SAM3-class segmenters. The thesis of this project is that
+those models make aerial wildlife 3D detection tractable in a way it was not two years ago —
+**so use them, and use them elegantly.** Prefer one well-chosen frozen foundation model plus a small
+trained head over a pile of bespoke fixes. Elegance and ingenuity are requirements, not garnish.
+
+## The purpose
+
+**Wildlife monitoring from drones.** Count animals, support identification, and know whether a given
+observation was good enough to use. Orientation/visibility is what answers that last question — it is why
+viewpoint is in the model at all, and it is a monitoring deliverable, not an academic curiosity.
+
+## Settled — do NOT reopen
+
+- **Metric scale is out of scope.** WildBox GT is per-segment scale-normalised (median depth = 1.0);
+  metric depth/size is unidentifiable here. Everything we measure is scale-invariant by construction.
+- **Orientation needs its own output + flip-sensitive grading.** NHD / 3D IoU / BEV are EXACTLY invariant
+  to a 180 deg flip (proven: min BEV IoU 1.000 over 3000 boxes), so the existing pose loss can never teach heading.
+- **Tracking is a label-generation dependency, not a runtime one.** The model is per-frame, permanently.
+- **VGGT is not a runtime dependency** — it authored the dataset offline. A 3D box is not a reconstruction.
+- **Do not retry:** Viterbi/temporal decoding of alpha (measured +0.3%, null); AM3D/CARLA external validation
+  (E8, cut).
+
+## How progress is judged
+
+| task | baseline to beat | how it is graded |
+|---|---|---|
+| 3D detection | 3D AP 12.4 / BEV@0.50 8.68 / NHD 7.063 (depth = 84.5% of the error) | 3D AP, BEV@0.25/0.50, disentangled NHD, paired 3 seeds |
+| orientation | chance — the train-transferred constant on that exact set | sign + flank, PER SPECIES, track-clustered, vs the train-transferred constant floor |
+
+<!-- ============================================================================================ -->
+
 # Aerial-wildlife monocular 3D detection, for orientation and visibility
 
 > **STEP 0 ON APPROVAL (context-loss-proofing):** copy this file verbatim to

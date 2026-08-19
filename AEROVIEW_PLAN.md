@@ -643,9 +643,10 @@ rsync -av --partial --include='*/' --include='frame_*.jpg' --exclude='*' \
 - Already on the cluster and must NOT be re-created: `WildBox_{train,val}.json`, and the frozen 2D-box files
   **`gt2d_WildBox_val_oracle_2d.json`** + **`gdino_WildBox_val_oracle_2d.json`** (every arm must share these).
 
-## ⚠ CLUSTER HAS NO OUTBOUND NETWORK (observed on `frontendnew`, 2026-07-26)
-`pip install` and any hostname lookup fail with
-`NewConnectionError: [Errno -2] Name or service not known` — **DNS does not resolve** on the login node.
+## ✅ CLUSTER NETWORK: HuggingFace IS reachable; only pypi is not (resolved 2026-07-26)
+**Verified on `frontendnew`:** `getent hosts huggingface.co` resolves (IPv6), `curl -I https://huggingface.co`
+returns **HTTP/2 200**, and `list_repo_files(...)` returns **76 files**. The only failure is **pip/pypi**
+(`Name or service not known` for pypi.org) — so **never run pip on the cluster; it is not needed.**
 Consequences:
 - **`pip install` is not needed anyway**: `huggingface_hub 0.36.2`, `hf-xet 1.4.3`, `requests`, `tqdm` are
   **already present** in `/storage3/3DOM/vshukla/envs/ovmono3d`. Only `hf_transfer` (an optional speed-up)
@@ -670,3 +671,31 @@ lost. Zero loose images: everything is zipped per video, so a transfer is 65 fil
 Because HF stores **per-video zips**, the laptop→cluster transfer should also send **zips, not loose jpgs** —
 far fewer files, better throughput, resumable per video. If the laptop lacks the zips, they exist on HF and
 also as `/mnt/d/3DBOX/papersubdata/<group>/<video>.zip` for at least some groups (verify).
+
+### ⭐ THE WORKING DOWNLOAD COMMAND (verified prerequisites; do not deviate)
+```
+conda activate /storage3/3DOM/vshukla/envs/ovmono3d
+unset HF_HUB_ENABLE_HF_TRANSFER      # hf_transfer is NOT installed and pypi is unreachable; setting this
+                                     # makes huggingface_hub raise. hf-xet 1.4.3 IS installed and is faster.
+cd /storage2/3DOM/vshukla/repos/ovmono3d/datasets
+huggingface-cli download wildbox-anon-2026/wildbox-review --repo-type dataset --local-dir wildbox_hf
+cd wildbox_hf && for z in */*.zip; do unzip -q -n "$z" -d "$(dirname "$z")/"; done
+```
+**Zip layout verified**: each archive contains `<video>/<seg>/...` with **no group prefix**, so unzipping in
+place under `<group>/` yields `<group>/<video>/<seg>/frame_XXXXXX.jpg` — exactly what `file_path` in
+`WildBox_{train,val}.json` expects. **No path rewriting.** Each zip ≈ 580 MB / 1,466 files and includes
+`kitti_labels/`, `cameras.json`, `tracking_summary.json` as well as the jpgs, so the full pull is ~35-40 GB
+(vs 31.5 GB of jpgs alone). Nothing needs deleting — storage2 has 45 TB free.
+
+**IMAGE ROOT after unzip:** `/storage2/3DOM/vshukla/repos/ovmono3d/datasets/wildbox_hf`
+
+**Post-transfer check (expected values):**
+```
+find .../wildbox_hf -name "frame_*.jpg" | wc -l     # expect 59,598
+```
+⚠ **59,598, not 59,758** — the 160-image shortfall is the unshipped `rhin1/DJI_20250303174548_0001_D/seg4`
+(known dataset packaging gap, documented above). Do not treat it as a failed transfer.
+
+**Bonus:** the HF repo also carries `checkpoints/ovmono3d_lift_init5sp_seed0/model_final.pth` — the exact
+fine-tuned seed0 model whose predictions every D0/D0b/D0c diagnostic analyses. It is therefore publicly
+recoverable and can never be permanently lost.

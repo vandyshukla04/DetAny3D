@@ -94,7 +94,7 @@ orientation. We fix depth as far as it is fixable (Part 1) and grade the system 
 | **Template teacher** (frozen DINOv3 heading pipeline: α + `margin`) | **177,973 animal instances across 52,443 frames**, 60 videos, 4 species (NO gazelle) | primary α target; `margin` = per-sample confidence weight |
 | **Motion-derived heading** (`autolabel.label_track`, gated) | 25,554 images (14%) + 4,833 standing (`bridges.py`) | free and appearance-independent — the reason the student can *exceed* the teacher |
 | **Geometric visibility teacher** (`n·v`, ray-OBB occlusion, SAM-mask overlap; deterministic) | any frame with boxes + camera + masks | visibility-head target |
-| **Human face locks** (66 tracks, 2 zebra videos) | 11,084 instances | **gold — held out, never trained on** |
+| **Human face locks** (66 tracks, 2 zebra videos) | **5,542** instances [CORRECTED from 11,084] | **gold — held out, never trained on** |
 | **Human visibility labels** | 512 frame-sets, 3 species | **gold** for the visibility head |
 
 Splits: reuse `split.py` — **by video**, locked videos held out permanently, fingerprint-asserted
@@ -782,7 +782,7 @@ reproduced the published seed0 artefacts essentially exactly:
 |---|---:|---:|---:|
 | 2D AP | 39.614 | **39.623** | 0.009 |
 | 3D AP | 12.412 | **12.416** | 0.004 |
-| overall NHD | 7.065 | **7.064** | 0.001 |
+| overall NHD | 7.063 | **7.0637** | 0.001 |
 | disent xy / z / dims / pose | 2.209 / 5.970 / — / — | **2.211 / 5.970 / 0.776 / 0.547** | ~0 |
 
 Per-class 2D also matches (giraffe 19.29, grevys 28.47, elephant 56.25, plains 44.14, rhino 49.12,
@@ -833,3 +833,129 @@ wrong and would set up a misleading experiment.** Four reasons:
 
 Grade ONLY with flip-SENSITIVE metrics (sign/flank vs human locks; label-free flank-switch rate). NHD, 3D IoU
 and BEV are **invariant to 180° flips** and cannot measure orientation at all.
+
+---
+
+# ★ AUDIT VERDICT + CORRECTED GROUNDWORK (2026-08-19). THIS SECTION SUPERSEDES CONFLICTING TEXT ABOVE.
+
+13-agent adversarial audit (6 dimensions verified, each attacked by a skeptic, then arbitrated).
+**VERDICT: PROCEED.** The core bet is well-posed; the join is exact; every E0 number reproduces.
+Only TWO blocking issues survived, both pre-flight, both < 1 h. Full record:
+`/tmp/.../scratchpad/SYNTHESIS.md` (regenerate from the workflow if lost).
+
+## B1 (BLOCKING) — horizontal flip inverts alpha. Fix before any GPU hour.
+`INPUT.RANDOM_FLIP="horizontal"` (`cubercnn/config/config.py:237`, never overridden) with prob 0.5.
+alpha = atan2(d.s, d.r), s = up x r (`papersub.py:221,232`). Under a camera-x mirror M: s -> -Ms, so
+**alpha -> -alpha: cos alpha (sign/end) SURVIVES, sin alpha (flank) INVERTS on every flipped sample.**
+Flank supervision becomes 50/50 self-contradictory and the head drives sin->0. Invisible in the training log.
+FIX: in `dataset_mapper.py` HFlip loop, `heading_alpha := -heading_alpha`, placed **OUTSIDE** the
+`if annotation['center_cam'][2] != 0:` guard at `:87` (the existing pose-mirror block at `:120-128` is nested
+inside it and would silently skip labels).
+⚠ RELATED TRAP: cubercnn's own hflip pose mirror is **not** the geometric mirror — it differs from `M R M` by
+exactly 180 deg about the box's height axis (a head/tail swap), invisible to every metric in use.
+**NEVER anchor alpha to `annotation['pose']`.**
+
+## B2 (BLOCKING) — the gold set overlaps the training labels.
+Both lock videos are 100% in `WildBox_train` (725 / 533 hits; **0** in val). Direct key overlap:
+`crops n crops_human` = 101, `crops_stand n crops_human` = 41 -> **142 exact keys on 12 of the 66 gold
+tracks = 1,105 of 5,542 gold instances (19.9%)**, and heading is near-constant within a track.
+FIX (join script only, no repo edit): train labels = `keys(crops) u keys(crops_stand)` MINUS `keys(crops_human)`
+MINUS both lock videos. **VERIFIED: this lands at exactly 9,887.** Assert 0 gradient-carrying orientation RoIs
+from the two lock videos.
+NOTE: no `builtin.py` edit is needed — `WildBox_test` is already whitelisted at `cubercnn/data/builtin.py:52`
+and `tools/train_net.py:394-395` registers any name in `DATASETS.TEST`.
+
+## ⚠ MY OWN MEASUREMENT — THE ARBITER'S "PROMOTE THE 7,460 VAL LABELS TO PRIMARY" IS UNSAFE AS STATED
+The arbiter recommended the 7,460 val motion+standing labels as the primary held-out grader without computing
+their floor. **I computed it. A CONSTANT alpha scores 87.9% sign / 77.4% flank there** (eval-fitted oracle only
+88.6/77.4). Cause, measured:
+
+| grader | n | train-transferred constant floor | eval-fitted (oracle) floor | R |
+|---|---:|---|---|---:|
+| val labels, POOLED | 7,460 | **87.9 sign / 77.4 flank** | 88.6 / 77.4 | 0.641 |
+| val, elephant | 1,666 | — | 77.2 / 71.4 | 0.417 |
+| val, **rhino** | 4,500 | — | **98.3 / 81.0** | **0.847** |
+| val, zebra | 1,294 | — | 74.7 / 72.6 | 0.388 |
+| val, **TRACK-BALANCED** (1/track) | **208** | — | **76.4 / 67.3** | 0.405 |
+| gold locks | 5,542 | **35.2 / 34.1** | 75.1 / 65.9 | — |
+
+**Rhino is 60% of the val grader and its headings are nearly all identical (R=0.847), so pooled val is
+saturated.** Consequences, binding:
+1. **NEVER pool the val grader.** Report per species, always beside that species' own constant floor.
+2. **Rhino-val cannot carry a result** (98.3% floor). Elephant (75 tracks) and zebra (53 tracks) are informative.
+3. **Track-balance or track-cluster everything.** The effective n is **208 tracks**, not 7,460 instances.
+4. **The floor is always the TRAIN-TRANSFERRED constant on that exact set** — never 45.7%, never 50%, never an
+   eval-fitted constant (that is an oracle). On the gold locks the transferred floor is only **35.2%**, which is
+   why the locks remain valuable as a *secondary* grader despite "images seen".
+
+## Phase 0 DECISIONS (now binding)
+1. **Grading rule.** Continuous alpha. sign = `|wrap(a_hat - a*)| < 90 deg`; flank = `sign(sin a_hat) == sign(sin a*)`.
+   Band-resolve by `|sin a*|`; report against the train-transferred constant on the same set.
+2. **Target array = `Y` = `[cos alpha, sin alpha]`, already on disk in all three crop files.** Do NOT use
+   `face_alpha[i, y_face]` — that is the heading SNAPPED to the nearest PCA box face.
+   **RE-MEASURED BY ME (the audit's figures were wrong — do not reuse them):** it flips the FLANK bit on
+   **9.11%** of `crops` and **11.19%** of `crops_stand`, and **0.00%** on `crops_human` — which is exactly why
+   this error is invisible on the gold set. The SIGN bit flips **0.00%** everywhere (the audit claimed
+   6.30%/3.19%): structurally impossible, since the 4 box faces are 90 deg apart so the nearest face is always
+   within 45 deg of the true heading, hence `|wrap(a_snap - a_true)| <= 45 deg < 90 deg`. Measured 0.00% confirms it.
+   NET: snapping costs ~9-11% of the FLANK bit and nothing of the sign bit.
+3. **Graders:** primary = val labels **per species, track-balanced**; secondary = the 5,542 locks, labelled
+   *"labels held out, images seen"*, track-clustered CIs over 66 tracks.
+4. **Ceiling text:** `92.5% sign (n=5,542) / 97.1% flank on |sin a|>=0.35 (n=5,281, 95.3% coverage) / 94.2% flank
+   on all 5,542`. Stop quoting flank as an independent second result — on this set flank is a deterministic
+   consequence of sign.
+5. **VGGT ledger.** DELETE "the orientation and visibility targets are not VGGT-derived". The allocentric BASIS
+   in which every alpha is expressed (`papersub.py:214`, `Segment.allocentric_basis`) is a per-segment consensus
+   over VGGT box rotations (`papersub.py:131-140`), so `up` is a fourth circularity channel. **Runtime fix
+   (measured by one auditor, NOT re-derived by the arbiter — verify before relying):** consensus over the
+   DETECTOR's own predicted poses agrees to median 1.76 deg (p90 4.19). Needs >=10 boxes pooled per segment;
+   the single-frame single-animal case is UNSOLVED.
+6. **Number fixes:** seed0 NHD **7.063** (not 7.065); gold set **5,542** everywhere (the 11,084 in the
+   supervision table is wrong — the other half has no crop; 5,542 is a clean stride-2 subsample, retention
+   exactly 0.500 on all 66 tracks); coverage **5.80% train-only** (the 5.37% used a train+val denominator);
+   depth share "84.5-91.8% across trained runs, up to 99.7% on collapsed zero-shot arms" (the four disentangled
+   components sum to 134.5% of the total, so it is an ablation ratio, NOT a partition share).
+7. **45.7% is real but belongs to the held-out WALKING split under a box-restricted 4-way decision**
+   (`METHOD.md:340`). It is NOT the student's floor. Superseded by item 4 of the measurement block above.
+
+## What is FALSIFIABLE, and what is not
+Three of the plan's four evaluation channels are provably invariant to a **global heading inversion**:
+NHD/BEV/3D AP (180-flip-blind, proven end-to-end: flipping all 118,809 seed0 predictions gives a
+**byte-identical** evaluator report, while a 90 deg control moves macro@0.50 from 8.20 to 0.87);
+the label-free flank-switch count (bit-identical for truth and for a 180-inverted prediction at 0.0% flank);
+and E7 re-ID AUC (a uniform relabel of query and gallery leaves every score unchanged).
+**The fourth channel IS flip-sensitive and multi-species: alpha vs motion-derived heading on held-out videos.
+Promote it to primary.** Falsifier: held-out sign accuracy fails to beat the train-transferred constant on the
+same set by more than the track-clustered 95% CI, band-resolved by `|sin a|`.
+Design effect ~7x on the locks => 95% CI ~+/-4.9pp at teacher accuracy. **No student-vs-teacher gap under ~5
+points is real.** No power analysis exists for the ladder's internal contrasts — do one before committing 9+ runs.
+
+## CUT / DEFER (decided)
+- **CUT E8** (AM3D/CARLA): not on disk, metric geometry on vehicles, out of scope.
+- **CUT any Viterbi/temporal-decoding rung.** Already measured: **+0.3%, NULL**, with a mechanism (errors are
+  whole-track inversions — 46/72 zebra tracks >80% wrong — and a smoothness prior PRESERVES a coherent wrong
+  trajectory). It is on the project's DO-NOT-RETRY list. An auditor recommended adding it by reading the
+  module's aspirational docstring; do not.
+- **DEFER E6** into E2 as one joint backbone+resolution arm. A DINOv3 patch-16 swap renames FPN outputs
+  p2/p3/p4 -> p3/p4/p5 (every `IN_FEATURES` breaks) and needs `SQUARE_PAD` raised with the input.
+- **DEFER E5** behind a data rung that runs the ray-OBB / n.v teacher over WildBox. The released
+  `visibility`/`truncation` fields are literal CONSTANTS over all 237,505 annotations; nothing generates targets;
+  the 512 human labels live on a different data organisation (6 tracks, one side positive 99.6% of the time).
+- **MOVE** the uncertainty/confidence head to "the detection-paper arm" — by the flip-invariance argument it
+  cannot move any Part-2 number. Keep it: the model realises only 56% of its own geometry under its own ranking.
+
+## The single biggest advance NOT being used
+A **frozen monocular RELATIVE-depth foundation model (Depth Anything 3 / MoGe-2 / UniDepthV2) as a conditioning
+input to the cube head.** Depth is the entire error budget; relative depth is affine-invariant, so it survives
+the out-of-scope-metric-scale constraint exactly where the metric-depth successors (UniMODE 28.2, 3D-MOOD 30.0,
+LocateAnything3D **38.90** — not 49.89, an auditor mis-cited the abstract) have nothing to bind to.
+Use it as a conditioning INPUT, not as a scored floor: WildBox GT depth is itself VGGT-authored, so scoring a
+depth model against it measures agreement with VGGT, not accuracy.
+
+## Herd visibility: HALF the stated purpose is NOT delivered
+**Per-animal viewpoint IS delivered** — `viewpoint_of(alpha)` is a pure function of one scalar, so a detector
+emitting alpha yields flank/end/strength/usable with **no 3D box, no gravity vector and no VGGT at inference**.
+That is a real collapse of the two-stage pipeline into one forward pass.
+**Herd visibility is NOT delivered and is not even specified**: every output is per-animal; there is no per-frame
+aggregate anywhere — no herd count, no fraction-of-herd-usable, no coverage/duty statistic, no who-blocks-whom
+edge list, no metric that scores a FRAME rather than an INSTANCE. Either specify one or drop the word "herd".

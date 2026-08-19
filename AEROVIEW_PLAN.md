@@ -20,6 +20,19 @@ The **right-hand side is done**: `DetAny3D/tools/heading/` derives everything fr
 (`viewpoint.py:59-71`), scoring **92.5% sign / 97.1% flank** on 5,542 human-locked instances, nothing
 trained. It is validated using WildBox's 3D boxes as a **proxy for a monocular detector's output**.
 
+> ### TERMINOLOGY - fixed, do not conflate (this error was made twice)
+> **3D reconstruction != 3D box.** VGGT is a *reconstruction* and it built WildBox's boxes **offline, once**.
+> It is **NOT** a runtime dependency of anything we run or build. The heading pipeline's actual per-detection
+> inference inputs are exactly: **a 3D box (`centers`, `dims`, `rotations`), the camera, gravity (`up`), and the
+> image crop** (`predict_crops.py:89,113`). A monocular 3D detector emits precisely that box - which is why
+> WildBox's boxes are a valid stand-in for one. Never write "the pipeline needs a reconstruction".
+>
+> Stronger still: `tools/heading/visibility.py` shows the **3D box is not fundamentally required either** -
+> `visible_flank(image_angle, up_cam, p_cam)` gets the flank from a **2D box + camera + gravity**, because
+> `left = up x forward` and the box was "only ever a scaffold" for turning a predicted image angle into a 3D
+> direction. That module is written and reasoned but **imported by nothing** (verified by grep) - an available
+> fallback, not the operational path.
+
 **The bottleneck is the detector**, and WildBox exists partly to show that: zero-shot 3D AP = **0.00** even
 given GT 2D boxes; fine-tuned OVMono3D-LIFT reaches **13.17 macro 3D AP / 8.68 BEV@0.50**, while 2D is
 essentially solved (**88.99 class-agnostic 2D AP@0.25**). So there are **two problems, one training run**:
@@ -805,8 +818,9 @@ wrong and would set up a misleading experiment.** Four reasons:
 2. **It is the TEACHER.** The head is trained on labels this pipeline produced; a distilled student is
    normally capped by its teacher, so "beat the teacher" is not a first-experiment criterion.
 3. **It is zebra-only** — 5,542 human-locked instances from 2 videos; not multi-species.
-4. **Different job.** The pipeline requires a 3D reconstruction at inference; the detector does not.
-   Matching it at ~90% while REMOVING that dependency is a win, not a shortfall.
+4. **Different runtime shape.** The pipeline is **two-stage**: box -> per-animal crop -> a SECOND network
+   forward (the frozen DINOv3 template, ~356 crops/s @224). Our head emits alpha inside the detector's own
+   forward pass. Matching ~90% while collapsing two stages into one is a win, not a shortfall.
 
 **Use this ladder instead:**
 | level | value | meaning |

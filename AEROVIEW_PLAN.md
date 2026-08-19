@@ -699,3 +699,60 @@ find .../wildbox_hf -name "frame_*.jpg" | wc -l     # expect 59,598
 **Bonus:** the HF repo also carries `checkpoints/ovmono3d_lift_init5sp_seed0/model_final.pth` — the exact
 fine-tuned seed0 model whose predictions every D0/D0b/D0c diagnostic analyses. It is therefore publicly
 recoverable and can never be permanently lost.
+
+---
+
+# SANITY CHECK before training — label join, gazelle scope, and the exact model contract (2026-07-26)
+
+## GAZELLE: in the detector, absent from orientation. Both are correct.
+| | classes | gazelle? |
+|---|---|---|
+| **Part 1 — detector** (WildBox benchmark) | 6: giraffe, grevys_zebra, elephant, plains_zebra, rhino, **gazelle** | **YES — must keep.** Dropping it changes the benchmark and breaks comparability with the published 13.17 3D AP / 8.68 BEV@0.50 |
+| **Part 2 — orientation/visibility** (heading project) | 4: elephant, giraffe, rhino, zebra (merged) | **NO — zero labels exist** |
+
+Gazelle was excluded from the heading project for good reason, and the data supports it: gazelle has the
+**smallest animals** (median 87 px), the **worst GT stability** (depth jitter 0.120 BL, dims CV 0.162) and
+**near-useless motion-yaw agreement** (33.7° in a world ground plane vs a 45° null). So:
+**train the detector on all 6 classes; MASK gazelle in the orientation loss.** Note also the heading project
+merges zebra while the detector splits plains/grevys — the orientation label is species-agnostic, so this is
+harmless, but do not try to map heading `species` onto detector `category_id`.
+
+## ⚠ THE JOIN KEY — a trap that silently loses 99% of labels
+`crops.npz` stores **`frame` as the SEGMENT-LOCAL index (0..199)**, while the released `file_path` carries the
+**video frame number** (`frame_004210.jpg`). Joining on `frame` matches **265 / 237,505 = 0.1%** and looks
+like "the labels don't join". **Join on `image_name`** (the actual filename) instead:
+
+    key = (video, seg_name, int(track.split("::")[-1]), image_name)
+
+With the correct key: **12,762 / 12,762 = 100% of heading labels land on a detector annotation.**
+
+## Measured orientation-label coverage of the detector's training set
+| class | annotations | with heading label | coverage |
+|---|---:|---:|---:|
+| plains_zebra | 62,450 | 1,681 | 2.7% |
+| gazelle | 59,379 | **0** | **0.0%** |
+| rhino | 46,013 | 5,457 | 11.9% |
+| elephant | 42,927 | 3,614 | 8.4% |
+| grevys_zebra | 23,048 | 1,182 | 5.1% |
+| giraffe | 3,688 | 828 | 22.5% |
+| **total** | **237,505** | **12,762** | **5.37%** |
+
+Adding `crops_stand.npz` (4,833 standing labels) takes it to ~17.6 k ≈ **7.4%**. **This is sparse — the
+orientation loss MUST be masked, not dense**, and it is an auxiliary term, not the main objective. Sparse
+supervision is workable (this is the standard auxiliary-head setup) but it caps how much the orientation head
+can learn, and it is the strongest argument for the (currently deprioritised) teacher-distillation pass if the
+head turns out to be data-limited rather than bias-limited.
+
+## Two cluster blockers found while preparing the first run (both fail SILENTLY)
+1. **Image root.** `datasets.py:131-137` hardcodes `image_root='datasets'` (relative to CWD) and builds
+   `file_name = datasets/<group>/<video>/<seg>/frame_X.jpg`. We unzipped to `datasets/wildbox_hf/<group>/...`.
+   Fix with symlinks (no data movement):
+   ```
+   cd /storage2/3DOM/vshukla/repos/ovmono3d/datasets
+   for g in elep1 elep2 elep3 gaze1 gira1 gira2 rhin1 rhin2 zebr1 zebr2 zebr3; do ln -sfn wildbox_hf/$g $g; done
+   ```
+2. **`configs/wildbox/category_meta.json` currently symlinks to `category_meta_wildlife5.json`** (5 classes:
+   giraffe, zebra, elephant, rhino, gazelle) while the wildlife6 config declares **6**. `--eval-only` reads
+   the meta *next to the config* (`train_net.py:411`). This is the documented footgun that once produced
+   silently wrong per-class metrics. Fix:
+   `ln -sfn category_meta_wildlife6.json configs/wildbox/category_meta.json`

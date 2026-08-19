@@ -94,7 +94,7 @@ orientation. We fix depth as far as it is fixable (Part 1) and grade the system 
 | **Template teacher** (frozen DINOv3 heading pipeline: α + `margin`) | **177,973 animal instances across 52,443 frames**, 60 videos, 4 species (NO gazelle) | primary α target; `margin` = per-sample confidence weight |
 | **Motion-derived heading** (`autolabel.label_track`, gated) | 25,554 images (14%) + 4,833 standing (`bridges.py`) | free and appearance-independent — the reason the student can *exceed* the teacher |
 | **Geometric visibility teacher** (`n·v`, ray-OBB occlusion, SAM-mask overlap; deterministic) | any frame with boxes + camera + masks | visibility-head target |
-| **Human face locks** (66 tracks, 2 zebra videos) | **5,542** instances [CORRECTED from 11,084] | **gold — held out, never trained on** |
+| **Human face locks** (66 tracks, 2 zebra videos) | **5,542** instances [CORRECTED from 11,084] | **SECONDARY gold — "labels held out, IMAGES SEEN"** ⚠ both lock videos are 100% in `WildBox_train`, and 142 exact keys on 12 of the 66 tracks (1,105 instances = 19.9%) overlap the training label pool unless explicitly subtracted — see B2. The old claim "never trained on" is FALSE. |
 | **Human visibility labels** | 512 frame-sets, 3 species | **gold** for the visibility head |
 
 Splits: reuse `split.py` — **by video**, locked videos held out permanently, fingerprint-asserted

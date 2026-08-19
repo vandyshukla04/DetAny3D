@@ -34,7 +34,7 @@ one, so this is domain adaptation, not a grab-bag.
 
 | assumption | reality here | fix |
 |---|---|---|
-| objects span many patches | median animal **130 px** natively (p90 280; giraffe 335, elephant 214) — but `SQUARE_PAD: 560` shrinks 1920→560, leaving **55% under 3×3 DINOv2 patches** | **native-resolution crop stream** (336 px at context ×2.5 ⇒ ~9.6 patches/animal, capped 32 crops/iter). Cheaper *and* sharper than upscaling the whole frame, since animals occupy 6.8% of width |
+| objects span many patches | median animal **142 px** natively [CORRECTED — and note **giraffe is SMALLER than elephant**, not larger] — but `SQUARE_PAD: 560` shrinks 1920→560, leaving **55% under 3×3 DINOv2 patches** | **native-resolution crop stream** (336 px at context ×2.5 ⇒ ~9.6 patches/animal, capped 32 crops/iter). Cheaper *and* sharper than upscaling the whole frame, since animals occupy 6.8% of width |
 | depth ranges ~100× | within a segment depth spans **±10–20%**; absolute is unidentifiable (GT normalised to median 1.0, `prepare_wildbox_dataset.py:393-406`) | **predict depth relative to the scene**, `z = z̃·exp(δ)` anchored at the frame median, δ bounded. Model *starts at* the strongest trivial baseline and learns residuals |
 | calibrated intrinsics | VGGT `fx` spans **10.9×** (1011–11055), varies 1.4–2.6× *within one video*, r=0.49 with true zoom, `cx,cy` pinned to image centre | **give K to the head as an input** — it is currently blind to box size and focal length (`roi_heads.py:366/430`), so it structurally cannot express `z = f·L/s`. Keep K in the *xy* decode (`roi_heads.py:802-803`), which works (NHD-xy = 2.1) |
 | rigid objects, CAD-like size priors | deformable animals, 6 species; `DIMS_PRIORS` is **off**, so dims initialise at 1.0 vs GT ≈ 0.03 — a **33× error** | enable per-species dimension priors; normalise the disentangled losses by the GT cuboid diagonal (training currently uses absolute units while eval normalises) |
@@ -107,7 +107,8 @@ So WildBox supports valid **within-benchmark** comparison. Its numbers must **no
 KITTI/nuScenes, and no metric claim may be made.
 
 **The real caveat is GT provenance, not scale.** Boxes are pseudo-labels (VGGT+SAM3+PCA) with known biases
-(aspect ratios collapse to ~2.3:1; giraffe l/h 2.5–2.9 vs true ~0.90; 62% of tracks have frozen dims). So
+(aspect ratios collapse to ~2.3:1; giraffe l/h measured **1.59** [CORRECTED from 2.5–2.9]; per-frame dims are
+unstable — median within-track relative-std **0.21**, NOT "62% frozen" [CORRECTED]). So
 *dimension* accuracy against them partly measures agreement with VGGT. Crucially, **the orientation and
 visibility targets are not VGGT-derived**: human face locks (11,084), human visibility labels (512
 frame-sets), and motion-derived heading (25,554, from trajectory direction — far more robust than box shape).
@@ -167,7 +168,7 @@ four candidates, median 0.00° by construction); `acc45` (≡ sign bit-for-bit);
 - **D0 may invalidate the framing** — if a constant predictor matches the fine-tuned model, the paper becomes
   "the 3D head learns nothing here", and Part 1 must be re-scoped. That is why it runs first.
 - **We may be fitting VGGT's biases**, since GT is pseudo-label (aspect ratios collapse toward ~2.3:1;
-  giraffe l/h 2.5–2.9 vs true 0.90; 62% of tracks have frozen dims). Non-circular checks: biological
+  giraffe l/h measured 1.59 [CORRECTED]; within-track dims relative-std 0.21 [CORRECTED]). Non-circular checks: biological
   plausibility of predicted aspect ratios against published body sizes (**if we reproduce the broken giraffe
   ratio, we are fitting VGGT**), and agreement with a depth foundation model that never saw VGGT.
 - **A distilled student is capped by its teacher** — except motion labels are independent of the template, so

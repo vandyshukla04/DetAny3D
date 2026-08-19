@@ -53,14 +53,27 @@ The drone films animals **from a distance at a shallow angle** — it does not l
 precisely why FLANK visibility is the natural signal: you see an animal's SIDE, not its back
 (71.8% of instances have usable `|sin alpha| >= 0.35`).
 
-**Consequences (binding):**
-- **Never propose nadir / top-down / BEV-from-above priors, or satellite-style methods.** They do not apply.
-- **Ground-level monocular 3D detection (KITTI / nuScenes / Omni3D) is MORE relevant than aerial or
-  remote-sensing work.** The regime is "small, distant objects at a shallow angle" — closer to a long-lens
-  ground photograph than to a UAV survey. "Aerial" here means the CAMERA is airborne, not that the VIEW is
-  top-down.
-- A ground-plane constraint is **not** automatically useful: at ~16 deg the ray-ground intersection is
-  grazing and hypersensitive to camera pitch/height error, and our extrinsics are VGGT's invention.
+**WHY there is no nadir — and why that is NOT a boundary on the solution.** The drone is being flown to
+*monitor and recognise individual animals from different sides*. Nadir would show only backs and would
+defeat the entire purpose. So the absence of nadir is a consequence of the DATA-COLLECTION GOAL, not a
+limitation to design around. **The only fixed fact is: nadir is not the view.** Nothing else here is a
+constraint on what methods may be considered.
+
+**The regime is OBLIQUE AERIAL — high altitude, shallow depression angle, and ZOOM.**
+⚠ [CORRECTED 2026-08-20] An earlier version of this section claimed ground-level monocular 3D detection is
+"MORE relevant than aerial work". **That was an over-correction and is withdrawn.** This is neither nadir
+NOR ground-level: the camera is genuinely airborne and high, viewing obliquely, usually zoomed in.
+
+**The suspected crux, to be RESEARCHED not assumed: depth estimation degrades specifically when zooming in
+from high altitude.** Under strong zoom the focal length is large, variable and effectively unknown
+(measured: VGGT `fx` spans 10.9x pooled and 1.5x median *within one video*), which is precisely the regime
+where the apparent-size depth cue becomes unidentifiable — a large far animal and a small near one project
+identically. Whether that is the dominant mechanism, and what resolves it, is an open research question for
+this project, not a settled claim.
+
+**Do NOT over-constrain the search.** Ideas may come from anywhere — aerial/oblique perspective detection,
+ground-level mono3D, photogrammetry, self-calibration, foundation models, equivariance, or elsewhere.
+The one thing ruled out is assuming a top-down view.
 
 ## Settled — do NOT reopen
 

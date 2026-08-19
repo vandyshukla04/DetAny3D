@@ -36,6 +36,32 @@ trained head over a pile of bespoke fixes. Elegance and ingenuity are requiremen
 observation was good enough to use. Orientation/visibility is what answers that last question — it is why
 viewpoint is in the model at all, and it is a monitoring deliverable, not an academic curiosity.
 
+## The viewing geometry — MEASURED, and it rules things out
+
+**This is NOT a nadir / top-down dataset.** Measured over all 23,137 labelled crops (`cam_elev` in
+`crops*.npz`), camera elevation above the animal's horizontal plane:
+
+| statistic | value |
+|---|---|
+| median elevation | **15.8 deg** |
+| within 20 deg of nadir (>70 deg elev) | **0.00%** |
+| within 10 deg of nadir (>80 deg elev) | **0.00%** |
+| low / grazing (<20 deg elev) | **67.2%** |
+| oblique (20-70 deg) | 32.8% |
+
+The drone films animals **from a distance at a shallow angle** — it does not look down on them. That is
+precisely why FLANK visibility is the natural signal: you see an animal's SIDE, not its back
+(71.8% of instances have usable `|sin alpha| >= 0.35`).
+
+**Consequences (binding):**
+- **Never propose nadir / top-down / BEV-from-above priors, or satellite-style methods.** They do not apply.
+- **Ground-level monocular 3D detection (KITTI / nuScenes / Omni3D) is MORE relevant than aerial or
+  remote-sensing work.** The regime is "small, distant objects at a shallow angle" — closer to a long-lens
+  ground photograph than to a UAV survey. "Aerial" here means the CAMERA is airborne, not that the VIEW is
+  top-down.
+- A ground-plane constraint is **not** automatically useful: at ~16 deg the ray-ground intersection is
+  grazing and hypersensitive to camera pitch/height error, and our extrinsics are VGGT's invention.
+
 ## Settled — do NOT reopen
 
 - **Metric scale is out of scope.** WildBox GT is per-segment scale-normalised (median depth = 1.0);

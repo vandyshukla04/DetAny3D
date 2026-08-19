@@ -642,3 +642,31 @@ rsync -av --partial --include='*/' --include='frame_*.jpg' --exclude='*' \
   gazelle (2.85 GB) could be skipped — but Part 1 needs it.
 - Already on the cluster and must NOT be re-created: `WildBox_{train,val}.json`, and the frozen 2D-box files
   **`gt2d_WildBox_val_oracle_2d.json`** + **`gdino_WildBox_val_oracle_2d.json`** (every arm must share these).
+
+## ⚠ CLUSTER HAS NO OUTBOUND NETWORK (observed on `frontendnew`, 2026-07-26)
+`pip install` and any hostname lookup fail with
+`NewConnectionError: [Errno -2] Name or service not known` — **DNS does not resolve** on the login node.
+Consequences:
+- **`pip install` is not needed anyway**: `huggingface_hub 0.36.2`, `hf-xet 1.4.3`, `requests`, `tqdm` are
+  **already present** in `/storage3/3DOM/vshukla/envs/ovmono3d`. Only `hf_transfer` (an optional speed-up)
+  was missing. Do not fight pip.
+- **If there is genuinely no route to the internet, the HuggingFace shortcut is dead** and the only path is
+  transferring from the laptop, which already holds the images at `/mnt/d/3DBOX/papersubdata`
+  (31.5 GB, 59,598 jpgs). Downloading from HF onto the laptop would be pointless — the laptop already has
+  the data; HF was only ever a way to avoid the slow laptop uplink.
+- Before giving up on HF, check for the standard HPC escapes: an **HTTP(S) proxy** (`http_proxy`/`https_proxy`,
+  often set only in `/etc/environment` or by a module), or a **dedicated transfer/DTN node** with egress.
+
+### The HF repo DOES contain the full dataset (verified from the laptop)
+`wildbox-anon-2026/wildbox-review` (repo_type=dataset), 76 files:
+**65 per-video `.zip`** across all 11 groups (rhin1 12, zebr3 12, elep3 7, rhin2 7, elep1 6, zebr2 5,
+elep2 4, gaze1 4, zebr1 3, gira1 2, gira2 2), `WildBox_{train,val}_paper.json`, `DATASET_README.md`,
+`croissant.json(ld)`, and **two trained checkpoints**:
+`checkpoints/ovmono3d_lift_init5sp_seed0/model_final.pth` and `checkpoints/detany3d_ep2_seed0/checkpoint_0.pth`.
+⭐ That means **the fine-tuned seed0 checkpoint is publicly recoverable** — useful if the cluster copy is ever
+lost. Zero loose images: everything is zipped per video, so a transfer is 65 files, not 59,598.
+
+### Practical consequence for transfers
+Because HF stores **per-video zips**, the laptop→cluster transfer should also send **zips, not loose jpgs** —
+far fewer files, better throughput, resumable per video. If the laptop lacks the zips, they exist on HF and
+also as `/mnt/d/3DBOX/papersubdata/<group>/<video>.zip` for at least some groups (verify).

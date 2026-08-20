@@ -1294,3 +1294,27 @@ python tools/train_net.py --config-file configs/wildbox/OVMono3D_wildbox_wildlif
 # still owed separately: the alpha-off control (LOSS_W_ALPHA 0.0, GEO_TOKEN_DIM 0) when a GPU frees.
 ```
 Smoke-run watch: loss curves for loss_z; the token's effect grows from zero, so nothing should jump at iter 0.
+
+## RUN-2 SCORECARD (2026-08-20, single seed each — treat every delta with the within-seed-noise caveat)
+
+| | 2D AP | 3D AP | NHD | xy | z | dims | pose |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| run 1 (alpha_s0) | 38.78 | 11.18 | 6.985 | 2.199 | 5.878 | 0.782 | 0.560 |
+| control (mask+schedule) | 38.56 | 9.77 | 7.242 | 2.150 | 6.173 | 0.778 | 0.557 |
+| token (mask+schedule+token) | 33.67 | 10.79 | 7.382 | 1.937 | 6.494 | **0.587** | 0.557 |
+
+**Token - control (the isolated token effect):** dims **-0.19 (24% better — largest single-component gain
+so far)**, xy -0.21 better, AP3D +1.0 — but **z +0.32 WORSE (the opposite of the anchor thesis)** and
+**2D AP -4.9 (real regression; token gradients reach 2D only via the shared FPN)**. Matching coverage fell
+80.8 -> 73.6% as a consequence.
+**Control - run 1 (mask+schedule):** AP3D -1.4, z +0.30 worse — but VAL STILL CONTAINS THE JUNK the mask
+removed from train, so a model trained not to reproduce VGGT's cluster errors is punished by a val set full
+of them. NOT decidable against dirty val.
+**Orientation: stable across all three runs** (elephant +17.0/+17.5 over floor; R 0.58-0.61; control
+replicates run 1's grade nearly digit-for-digit). The heading head does not care about any of this.
+
+**VERDICT: the token did NOT deliver its headline promise (z worse), delivered real-looking dims/xy gains,
+and cost 2D. No seeds, no token surgery until the label-sane re-grade** (grade_detection_sane.py, pushed)
+**separates dirty-val punishment from real regression.** Next after that: if dims/xy gains survive and 2D
+loss is real -> likely fix is gating the token out of the shared trunk (feed z/dims branches only) — decide
+on the numbers, not before.

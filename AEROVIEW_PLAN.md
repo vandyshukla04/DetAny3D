@@ -1189,3 +1189,61 @@ rhino cases (offsets +5.7H..+9.9H): EVERY one is a STANDING rhino in a dense clu
 body fragment between animals — none lying down, none on mounds. => GroundCast decision Q2 resolved: these
 are pseudo-label failures; MASK them from the loss (m_p); no tilt output; deleting the 6D pose head stands.
 Also note gazelle 56.7% — gazelle GT is the least plane-consistent, consistent with its known worst-GT status.
+
+---
+
+# ★ PHASE A RESULTS (2026-08-20) — all CPU, one afternoon. THE FIRST TRAINING ARM IS REDIRECTED.
+
+## CHECK 2 — telemetry ground normal: **PASS, decisively**
+Gimbal-derived up vs GT up, per annotation frame, camera coords: **p50 0.73 deg, p90 3.36** (rule: pass <3).
+Join offset-insensitive (-1/0/+1 identical -> pitch varies slowly); roll ~0. Per-video p50 0.09-3.12.
+⚠ COVERAGE: only **23/63 videos carry gimbal attitude** (the _D series + the 4 KABR-2023 ones); the _V series
+logs focal/dzoom/rel_alt/GPS but NO gimbal block. On _V videos the ground normal must come from the
+own-prediction consensus (measured earlier: median 1.76 deg) — now load-bearing, stated.
+
+## CHECK 1 — intrinsics: **json K is per-segment fiction; telemetry fx adopted**
+fx_json / fx_tel(width-ref 35mm-equiv) is NOT a constant: median **0.297**, range 0.10-0.71 across videos —
+exactly the audit's "VGGT ~0.30x with scatter". No convention reconciles them; the GT's 3D lives in VGGT's
+fictional camera. ADOPTED: **K_tel = focal_len/36 x width x (dzoom already folded into focal_len)**, standard
+DJI width-referenced convention, with a ±4.7% width-vs-diagonal residual that no checkerboard exists to
+settle. Within-GT-gauge geometry must keep using json K (self-consistent); K_tel is deployment truth.
+SRT parser now speaks both DJI dialects (modern FrameCnt / 2023-era SrtCnt — the 4 zebr2 videos ARE 2023 KABR
+footage); cache: /mnt/d/aeroview/telemetry.npz, 63/63 parsed, only DJI_0147_trimmed lacks an SRT.
+
+## CHECK 4 — dense axis supervision: **rule FAILS as stated; licensed per-species, weighted**
+Box long-axis vs motion heading (mod 180): only **60.1% within 15 deg** (rule was >90%). BUT the axis is
+structurally right — human front face lies ON the long axis **98.2%** of gold; 90-deg axis swaps between
+nearby frames only **1.74%**. Per species (median err / <=30deg): elephant 9.9/85.3, rhino 9.0/88.8,
+zebra 20.0/65.6, giraffe 18.6-31.5/78.6 (the NECK breaks PCA long-axis=spine).
+=> dense axis term: elephant+rhino full weight, zebra down-weighted, **giraffe excluded or robust-lossed**.
+
+## CHECK 5 (+5b, 5c) — the decisive zero-training depth test: **pre-registered rule FAILS — and the
+decomposition redirects S3**
+All methods given the SAME per-frame oracle anchor, matched pairs on gimbal-bearing val videos:
+| method | median rel depth err | p90 |
+|---|---:|---:|
+| trained head (seed0) | **1.20%** | 5.37% |
+| plane cast, telemetry normal, box-bottom contact | 2.10% | 9.58% |
+| plane cast, telemetry normal, **TRUE (GT) contact** | 2.16% | — |
+| — restricted to label-sane annotations (|off|<=0.5H): head | **0.88%** | 3.22% |
+| — same restriction: plane | 1.06% | 3.75% |
+Three facts: (a) **the contact point is NOT the bottleneck** (2.10 ~ 2.16 — the feet objection matters less
+than predicted, per this grader); (b) the plane LOSES exactly on the dense-herd videos whose labels are known
+broken (45% rhino off-plane; 18/18 flagged crops = cluster junk) and **WINS on both clean videos**
+(0.43 vs 0.81; 1.22 vs 1.51) — the head is partly rewarded for reproducing VGGT's own errors; (c) on
+label-sane annotations the head still edges the plane (0.88 vs 1.06).
+**CONSISTENT RESOLUTION: the head's within-frame depth STRUCTURE is already near the identifiability floor**
+(matches the ladder: model+oracle-anchor 2.53 vs floor 2.70). The measured failure was always the per-frame
+ANCHOR (sd 0.0456 vs true drift 0.0203).
+
+## ⇒ S3 REDIRECTED (the whole point of Phase A):
+**Keep the learned depth head. Do NOT replace it with the plane decode.** Add exactly what the anchor failure
+calls for: (1) the geometric TOKEN (ray to RoI, log fx_tel, gimbal pitch, plane-depth-at-box-bottom as a
+PRIOR scalar) — the head is currently blind to every one of these; (2) the per-image ANCHOR head. The hard
+plane cast is demoted from decode to feature. Predicted target unchanged (NHD_z 5.88 -> ~3-4) but via the
+anchor, not the structure. This redirect cost one CPU afternoon instead of ~31 wasted A40-hours.
+
+## CHECK 3 — the human audit kit is BUILT and waiting
+/mnt/d/aeroview/audit_kit/annotate.html — 299 feet-visibility crops (stratified species x view x crowding)
++ 60 flagged boxes. One key per image, progress auto-saves, D downloads audit_results.json. The task-B
+answers become the human-grounded version of 5c's label-sanity filter.

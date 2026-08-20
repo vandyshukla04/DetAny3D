@@ -1343,3 +1343,29 @@ EXISTING ctrl): (a) token feeds the DIMS output only (dims_out reads features+to
 features — kills the FPN pollution, keeps the real gain); (b) add the per-image ANCHOR head that Phase A's
 diagnosis actually called for and run 2 cut for minimalism (pooled P5 + image geo -> delta_img; z scaled
 exp(delta), zero-init) — the anchor gap (2.67 raw vs 1.09 anchor-free) is the remaining real depth headroom.
+
+---
+
+# ★ VEHICLE RE-EVALUATION (2026-08-20): STAY. Full matrix in `REEVALUATION_DECISION.md` (same dir + backup).
+
+4 regime surveys (geometry FMs / modern mono3D / multitask-frozen / assembly) + decision agent. One line:
+**stay on OVMono3D + run 3 (dims-only token + per-image anchor head); MoGe-2 only as a gated afternoon
+anchor-probe + non-circular audit channel; DetAny3D parked as PRE-REGISTERED INSURANCE; DINOv3 clean-slate
+and full assembly rejected.**
+- The anchor answer CONVERGES from all four regimes on run-3's per-image head (z = z~*exp(delta_img) from
+  pooled features + log fx_tel + pitch, zero-init). No published system anywhere has a per-frame
+  arbitrary-gauge scale mechanism — the slot is novel in ANY vehicle. Cause of the drift is a KNOWN telemetry
+  scalar (zoom), so a 331M FM is probably unnecessary for it; MoGe-2 is the gated escalation only.
+- **DetAny3D activation trigger (falsifiable): fires iff after run 3 + the confidence fix, z sits at the
+  measured floor but AP3D/BEV still fails to beat 13.17/8.68 beyond noise** (= bottleneck proven to be the
+  lift head, not the anchor). Week-one deliverable then: oracle-2D fine-tune + its native 12-bin alpha head
+  fed our 9,887 labels (replace the yaw=0.0 stub), same evaluator + graders; beats incumbent or dies in two
+  weeks. Its measured WildBox record (paper's own runs): macro BEV 8.33/1.99 best vs our 24.31-27.14/8.20-9.44.
+- **Assembly rejected permanently** (annotation pipeline != prediction model — user's correction stands;
+  multi-model inference chains are not the north star; components admissible as training-time teachers only).
+- NOW-list: (1) run 3 vs existing ctrl on sane grader; (2) CPU script: single-frame anchor identifiability
+  floor from GT z-stats — the yardstick for run 3; (3) MoGe-2 probe on the 23 telemetry videos (adoption rule:
+  only if run-3 gap >= 1.5x floor AND probe explains it); (4) GeoCalib check vs 0.73 deg bar (pitch for the 40
+  gimbal-less videos); (5) if run 3 positive: 3-seed, then promote the IoU-supervised confidence head (D0:
+  worth ~half the AP — the largest single lever anywhere in the matrix).
+- Permanent capital list + disposable list recorded in the decision doc.

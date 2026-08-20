@@ -1264,3 +1264,33 @@ HUMAN-CONFIRMED: the off-plane population is label junk, not behaviour. Zero lyi
 - No tilt output needed; the 6D-pose deletion stands on human evidence.
 - Giraffe is the consistent problem child across every audit (axis broken by the neck, worst feet
   visibility, worst GT) — tiny support anyway (110 val instances); handle by exclusion/robust weighting.
+
+---
+
+# ★ RUN 2 IMPLEMENTED, VERIFIED, PUSHED (2026-08-20) — scope held to the north star
+
+**Run 2 = geometric token + junk mask. Nothing else.** (Anchor head, axis/sign factorisation, plane decode,
+DINOv3 swap: PARKED — each returns only if run 2's two-task scorecard shows its gap.)
+
+- **Token**: 10 computed scalars per RoI [ray(3), log fx_tel, sin/cos pitch, valid, plane hint, log h, log w]
+  injected ADDITIVELY via a ZERO-INIT linear into both cube-head trunks. VERIFIED: init is bitwise run 1;
+  run-1 checkpoint loads with 0 shape mismatches; gradient reaches the embed; GEO_TOKEN_DIM=0 = run 1.
+- **Plumbing**: stamp_geometry.py writes geo=[fx_tel, pitch_rad, valid] per image (telemetry_min.npz ships
+  in-repo, 0.05 MB); datasets.py img_keys_optional ['p2','geo']; rcnn3d passes geos; roi_heads builds tau.
+- **Junk mask (train only)**: |off|>1.0H -> valid3D=false -> is_ignore. **38,520 train anns masked (22.6%),
+  gazelle 26,649 (~62% of its train 3D supervision)** — the human-audited 95%-fragment population. VAL UNTOUCHED.
+- Preflight still 16/16 on stamped jsons. Commits: ovmono3d run-2 commit after b9bf2fb; pushed.
+
+**CLUSTER COMMANDS (run 2):**
+```
+git pull
+python tools/aeroview/stamp_geometry.py --train datasets/Omni3D/WildBox_train.json --val datasets/Omni3D/WildBox_val.json
+python tools/aeroview/preflight_orientation.py --labelled-dir datasets/Omni3D     # expect 16/16
+# smoke 100 iters, then full 15k; warm-start from the alpha_s0 run-1 checkpoint:
+python tools/train_net.py --config-file configs/wildbox/OVMono3D_wildbox_wildlife6.yaml --num-gpus 1 \
+  SOLVER.MAX_ITER 15000 SOLVER.IMS_PER_BATCH 8 MODEL.ROI_CUBE_HEAD.GEO_TOKEN_DIM 10 \
+  MODEL.WEIGHTS /storage2/3DOM/vshukla/runs/alpha_s0/model_final.pth OUTPUT_DIR /storage2/3DOM/vshukla/runs/run2_token_s0
+# grade: grade_orientation.py on the new preds; detection numbers from the eval log; compare BOTH vs run 1.
+# still owed separately: the alpha-off control (LOSS_W_ALPHA 0.0, GEO_TOKEN_DIM 0) when a GPU frees.
+```
+Smoke-run watch: loss curves for loss_z; the token's effect grows from zero, so nothing should jump at iter 0.

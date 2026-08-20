@@ -1181,3 +1181,11 @@ identifiable from where; compute the computable factor exactly; learn only the r
 - First result banked meanwhile: **elephant sign 96.2% vs 78.7% floor, CI [92.7,98.6], 64 tracks, R=0.608**
   (alpha_s0 run, 1 seed); contact sheet visually clean. Zebra +23.1 not resolvable (22 tracks); grevys/rhino
   uninformative by construction. alpha-off control still owed when the A40 frees.
+
+## RESOLVED (2026-08-20): the out-of-plane boxes are CLUSTER LABEL FAILURES, not lying-down animals
+Measured (plane through box bottoms per segment, offset in units of own height H): |off|>0.5H — rhino 45.0%,
+gazelle 56.7%, plains 29.4%, grevys 23.5%, elephant 15.7%, giraffe 9.1%. Visual inspection of the 18 worst
+rhino cases (offsets +5.7H..+9.9H): EVERY one is a STANDING rhino in a dense cluster with the box landed on a
+body fragment between animals — none lying down, none on mounds. => GroundCast decision Q2 resolved: these
+are pseudo-label failures; MASK them from the loss (m_p); no tilt output; deleting the 6D pose head stands.
+Also note gazelle 56.7% — gazelle GT is the least plane-consistent, consistent with its known worst-GT status.

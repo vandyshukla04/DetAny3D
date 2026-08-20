@@ -1318,3 +1318,28 @@ and cost 2D. No seeds, no token surgery until the label-sane re-grade** (grade_d
 **separates dirty-val punishment from real regression.** Next after that: if dims/xy gains survive and 2D
 loss is real -> likely fix is gating the token out of the shared trunk (feed z/dims branches only) — decide
 on the numbers, not before.
+
+## LABEL-SANE RE-GRADE (2026-08-20) — the run-2 verdict, now decidable
+
+| run | recall@.5 | z raw | z anchor-free | dims log-err | xy px |
+|---|---:|---:|---:|---:|---:|
+| run1 | 81.8% | 2.67% | 1.09% | 0.226 | 10.2 |
+| ctrl | 81.8% | 2.66% | 1.09% | 0.226 | 10.2 |
+| token | 75.2% | 3.29% | 1.15% | **0.159** | 11.5 |
+
+1. **ctrl == run1 TO THE SECOND DIGIT on every sane metric.** The mask + 15k extra iters changed nothing
+   real. The official AP3D drop (11.18 -> 9.77) is the model NO LONGER REPRODUCING junk GT that still sits
+   in official val — the AP that was "lost" was the AP of hallucinating fragments. **The mask is free; the
+   model is converged; run-to-run schedule effects are nil on sane grading.**
+2. **The token's regressions are REAL, not artifacts**: 2D recall -6.6 (gradient pollution of the shared
+   FPN), raw z worse (3.29 vs 2.66 — it made the ANCHOR worse, its primary target), anchor-free z ~flat at
+   1.09-1.15% which is AT the identifiability floor (Phase A: head structure was already near-floor).
+3. **The token's dims gain is REAL and survives clean grading: 0.159 vs 0.226 (-30%).** Mechanistically
+   sensible (angular size + true fx + range hint -> proportions). The ONE keepable thing.
+4. Orientation stable across all three runs throughout.
+
+**DECISION: run-2's token formulation is rejected as-is.** Salvage plan (run 3, ONE run, judged against the
+EXISTING ctrl): (a) token feeds the DIMS output only (dims_out reads features+tok; everything else reads
+features — kills the FPN pollution, keeps the real gain); (b) add the per-image ANCHOR head that Phase A's
+diagnosis actually called for and run 2 cut for minimalism (pooled P5 + image geo -> delta_img; z scaled
+exp(delta), zero-init) — the anchor gap (2.67 raw vs 1.09 anchor-free) is the remaining real depth headroom.

@@ -1247,3 +1247,20 @@ anchor, not the structure. This redirect cost one CPU afternoon instead of ~31 w
 /mnt/d/aeroview/audit_kit/annotate.html — 299 feet-visibility crops (stratified species x view x crowding)
 + 60 flagged boxes. One key per image, progress auto-saves, D downloads audit_results.json. The task-B
 answers become the human-grounded version of 5c's label-sanity filter.
+
+## HUMAN AUDIT RESULTS (2026-08-20, all 359 items answered; criterion: >=1 visible foot => V)
+Raw: /mnt/d/aeroview/audit_kit/audit_results.json
+
+**Task A — ground contact (n=299):** V **76.3%** / H **21.1%** / U 2.7%.
+Per species H-rate: rhino 28.3, giraffe 25.4 (+13.6 unsure), grevys 23.3, plains 20.0, elephant 8.3.
+=> ~1 in 5 heading-labelled animals shows NO ground contact — matches the 21.3% crowding figure — so any
+contact-dependent pathway needs its visibility flag, and depth for that fifth must come from other cues.
+Consistent with Check 5b (contact was not the current bottleneck).
+
+**Task B — the flagged off-plane boxes (n=60): B (fragment/wrong) 95.0%, G 5.0%, L (lying) 0.0%.**
+HUMAN-CONFIRMED: the off-plane population is label junk, not behaviour. Zero lying-down animals.
+- The mask policy is now human-grounded, not model-inferred: exclude |off|>0.5H labels from losses AND from
+  depth grading (the 5c label-sane filter is validated — 95% of what it flags a human calls junk).
+- No tilt output needed; the 6D-pose deletion stands on human evidence.
+- Giraffe is the consistent problem child across every audit (axis broken by the neck, worst feet
+  visibility, worst GT) — tiny support anyway (110 val instances); handle by exclusion/robust weighting.

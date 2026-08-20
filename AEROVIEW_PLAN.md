@@ -1150,3 +1150,34 @@ the same way, which is the R=0.847 concentration that lets a constant score 98.3
 **Use it at three points:** (1) NOW on GT, as a label audit per species; (2) immediately after the first
 training run, GT vs prediction on the same frames — look for solid arrows pointing at tails; (3) on the
 held-out val species, since a systematic inversion there is exactly what the flip-blind metrics cannot report.
+
+---
+
+# ★ ARCHITECTURE DECIDED (2026-08-20): **GroundCast** — see `GROUNDCAST_DECISION.md` (same dir; backup in /mnt/d/aeroview/plan_backup/)
+
+11-agent research workflow (6 exploration sweeps -> metric adjudication -> 3 biased designs -> arbiter), with
+the user's two objections (hidden feet; telemetry sensitivity under zoom: dZ/Z = 6.2%/deg pitch bias at 15.8
+deg, 10%/5m terrain) injected and adjudicated. One idea applied twice: **factorise each output along what is
+identifiable from where; compute the computable factor exactly; learn only the residual.**
+- **Depth = anchor x plane-structure x residual.** The telemetry plane is a DIFFERENTIABLE PRIOR MEAN, not a
+  read-off (that is what the objections forced); a per-image anchor head (init = the median(z)=1 convention on
+  own detections) learns the gauge; a per-RoI residual absorbs hidden feet / mounds / lying animals.
+- **Orientation = axis x sign.** KEY: the boxes carry the body axis MOD pi on ALL 237,505 annotations (PCA
+  sign-arbitrary but axis-valid) => dense doubled-angle axis supervision (24x expansion, gated by S1b audit)
+  + the 9,887 sparse labels spent ONLY on the sign bit, via an antipodally-tied von Mises mixture.
+- **Depth-FM verdict (adjudicated, user objection 4):** REJECTED as scene model / input channel — arithmetic:
+  1.24% intra-object depth signal vs >=2% AbsRel at ~9 patches on target; where the plane works the FM cannot
+  beat it, where the plane fails is the FM's documented telephoto weakness. FM survives ONLY as a gated
+  training-time distillation arm (S2d gate) + a non-circular audit channel. Foundation models carry the
+  APPEARANCE side (frozen DINO backbone; DINOv3 sign probe) — geometry is computed, not learned, because
+  telemetry makes it exactly known.
+- Arbiter verified code itself: GRAZE's bottom-centre claim WRONG (`center_cam` is the VGGT CENTROID,
+  prepare_wildbox_dataset.py:65,431,448,515; commit 22a266a converts only released KITTI labels) => the
+  (H/2)*n_hat contact lift is required. IMS_PER_BATCH=4 => ~0.9 labelled sign instances/iter.
+- **Build: S0 intrinsics+telemetry gates -> S1 label/axis audits -> S2 zero-training precursors (incl. the
+  decisive plane-vs-head test and the FM gate) -> S3 depth arm -> S4 orientation arm -> S5 calibration ->
+  S6 ranker (gated) -> S7 conditional -> S8 5-seed headline + KABR.** S0-S2 are CPU/cheap and runnable now.
+  ~95-130 A40-h total. Falsifiers pre-registered (telemetry join p50>7 deg kills the central claim, etc.).
+- First result banked meanwhile: **elephant sign 96.2% vs 78.7% floor, CI [92.7,98.6], 64 tracks, R=0.608**
+  (alpha_s0 run, 1 seed); contact sheet visually clean. Zebra +23.1 not resolvable (22 tracks); grevys/rhino
+  uninformative by construction. alpha-off control still owed when the A40 frees.

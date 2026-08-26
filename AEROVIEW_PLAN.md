@@ -1853,3 +1853,54 @@ Total ≈ 11 weeks with one person + agent; M1–M2 overlap with the training-fr
 - Matching instability early -> curriculum already freezes 3D heads; if still unstable, add DN-DETR-style denoising queries (flagged, off by default).
 - VGGT chunk misalignment within a segment -> caught by the blocking consistency check in 0.1; remedy is re-running global alignment for that segment, never per-chunk terrain.
 - VGGT pose degradation on rapid-rotation segments -> census flags them; if Gate 1 outliers concentrate there, exclude and report as an operating-envelope limit rather than debugging indefinitely.
+
+# ★ TA-DETR M1 EXECUTION LOG (2026-08-26) — COMPLETE. BOTH GATES PASS.
+
+**Gate A (resolution mapping): PASS — per-axis anamorphic adopted** (sx=1920/518, sy=1080/294; json K
+cx/cy ratios exact). T-A3 REFUTED the pad-row hypothesis: depth rows 292–294 carry normal data on every
+sampled segment — all 294 rows are image. Internal 518-consistency p50 0.77 px over 345 segments.
+3 segments flagged >5 px, all resolved BENIGN in Gate B (zebr3 0004_V seg3/seg4 grade 0.087/0.077 —
+their flags were the centroid-vs-box-center proxy; rhin1 0001_D seg1 0.293 = the rhino offset at its
+strongest, still passes). Constants live in `tadetr/data/resolution.py`.
+
+**Terrain caches: 345/345 built** (151 MB, ~35 min, 4 CPU workers), manifest committed at
+`tools/tadetr/data/terrain_MANIFEST.json`. Two build fixes en route: (1) tangent-frame reference point
+`ctr` added to the contract — without it every in-plane grid lookup would have been silently wrong;
+(2) **7 degenerate-confidence segments** (VGGT conf ≈ 1.0 everywhere — globally unconfident recon)
+needed the conf floor relaxed to pure-p20 (the 1.5 absolute floor rejected every pixel). Those 7 are
+the ENTIRE Gate-B worst list (med 1.4–13.4) ⇒ **operating-envelope exclusion candidates; one is in VAL
+(zebr2__DJI_0143__seg5, med 5.91) — envelope-flag it for Gate 1 / all M2+ eval.** 62 box-up warnings
+(elephant-heavy segments, 10–27 deg).
+
+**Gate B (do GT boxes stand on the terrain): PASS — train sane median |d|/H = 0.1421 (bar 0.3), val
+0.1221. missing-join 0 of ~220k annotations — the three-tree join is total.** Junk population sits at
+med 1.37–1.40 off terrain (sharp separation; re-confirms the human audit). Tail: frac<0.3 = 75.7%
+train / 79.1% val, dominated by the 7 degenerate segments + high-rotation rhinos.
+
+**Species signed offsets (train; the A0 species-offset table input; mechanism: thin legs
+under-reconstructed at 518-res ⇒ box bottom ≈ shin height):**
+| species | per-seg median | weighted mean | note |
+|---|---:|---:|---|
+| plains/grevys zebra | −0.01 / −0.02 | −0.02 | sits ON terrain — offset ~0 |
+| rhino | **+0.108** | **+0.142** | consistent (p10 +0.02): table helps most |
+| elephant | +0.123 | −0.015 | HIGH inter-segment variance — constant only partially helps; learned δh (A2) needed |
+| gazelle / giraffe | +0.078 / +0.091 | +0.10 / +0.09 | moderate |
+
+**Rotation census (spec §0.1):** optical-axis rotation range p50 10.1°, p90 53.6°; 24 segments > 60°.
+High-rotation ∩ degenerate-conf ∩ Gate-B-tail overlap strongly (rhin1 0003_D seg2: 112° AND conf≈1.0;
+zebr2 DJI_0143 seg5: 97° AND conf≈1.0) — the spec's predicted VGGT-degradation envelope, measured.
+`datasets/tadetr/reports/rotation_census.json`.
+
+**Stamps (labelled working copies /mnt/d/aeroview/labelled/):** `contact_uv`/`contact_valid`
+(train 132,034/170,554 = 77.4% valid — the invalid 22.6% is EXACTLY the junk-mask population, chain
+cross-validated; val 100%), `geo_alt` (63/63 videos altitude, 23 roll) from the new committed bundle
+`tools/tadetr/data/telemetry_alt_min.npz` (0.22 MB).
+
+**Cluster ship-list when next connected:** (1) `git pull` on cluster ovmono3d; (2) rsync
+`datasets/tadetr/terrain/` (151 MB) to `/storage2/3DOM/vshukla/repos/ovmono3d/datasets/tadetr/terrain/`;
+(3) re-run the 4 stamp scripts on the cluster jsons (idempotent). Nothing else moves.
+
+**NEXT (M2):** `tadetr/geometry/{rays,heightfield,intersect,lift}.py` + `run_geometric_lift.py`
+(modes gt2d/gdino) + `preflight_tadetr.py`; **Gate 1 = NHD-z(A0, gt2d) ≤ 6.5, strong < 5.9** via
+`tools/eval_ovmono3d_geo.py` (wildlife6 category_meta work-dir trap) + `grade_detection_sane.py`
+(refs: run1 z-raw 2.67% / anchor-free 1.09%) — with the val envelope flag applied and reported both ways.

@@ -1369,3 +1369,487 @@ and full assembly rejected.**
   gimbal-less videos); (5) if run 3 positive: 3-seed, then promote the IoU-supervised confidence head (D0:
   worth ~half the AP — the largest single lever anywhere in the matrix).
 - Permanent capital list + disposable list recorded in the decision doc.
+
+
+<!-- ════════════════════════════════════════════════════════════════════════════════════════════ -->
+<!-- ════════════════════════ NEW PROJECT: TA-DETR (appended 2026-08-26) ═══════════════════════ -->
+<!-- ════════════════════════════════════════════════════════════════════════════════════════════ -->
+
+# TA-DETR — Terrain-Anchored Detection with Herd Scale Coupling. THE PLAN (v0.1 → build)
+
+> ## ⏸ RESUME HERE (state as of 2026-08-26, computer restart)
+> **Status: plan COMPLETE and verbally accepted by the user** ("I accept the plan but I have to
+> restart the computer"). Formal plan-mode approval + execution had NOT started yet.
+> **On resume, in order:** (1) re-read this whole TA-DETR section; (2) get formal approval /
+> exit plan mode; (3) execute STEP 0 below (copy the verbatim spec — preserved at the END of this
+> file — into `tadetr/TADETR_SPEC.md`; mirror this section into `DetAny3D/AEROVIEW_PLAN.md` +
+> `/mnt/d/aeroview/plan_backup/`; update memory); (4) start M1 (`verify_resolution_mapping.py`
+> first — all LOCAL CPU, needs /mnt/d mounted; if /mnt/d is stale: user runs
+> `sudo umount /mnt/d && sudo mount -t drvfs D: /mnt/d`).
+> Everything needed to resume cold is in THIS file: verified data reality, gauge-bridge + M1-gate
+> measurements, spec amendments, the full build plan, the transfer manifest, and the verbatim spec
+> (appended at the end). The session scratchpad (/tmp) is expendable — all its results are recorded
+> here. User decisions already made: code inside ovmono3d repo; run-3 deferred until next GPU
+> connection (no new transfer needed for it).
+
+## Context — why this project, and its relation to AeroView
+
+The user handed over a complete build specification (v0.1, verbatim copy preserved at
+`scratchpad/tadetr_spec_verbatim.md` this session; the spec text must be copied into the new project's
+repo as `TADETR_SPEC.md` at step 0 of execution). One-line goal from the spec: *"A monocular 3D detector
+for aerial wildlife video that **never regresses depth**. It predicts a 2D ground-contact point per
+animal, computes depth by differentiable ray–terrain intersection, and resolves metric scale jointly
+across all same-species animals in the scene."* Frozen DINOv2 ViT-L/14 backbone + deformable-DETR
+decoder + species-gated cross-instance attention; depth = ray ∩ per-segment terrain height field (built
+offline from VGGT dense depth); herd latent scale module; training-free `geometric_lift` as Stage 1 /
+ablation A0; ablations A0–A6; milestones M1–M6 with gates.
+
+**Why this is the right successor to the AeroView findings, in one paragraph.** AeroView's measured
+end-state: within-frame depth STRUCTURE is at the identifiability floor (anchor-free z 1.09%); the entire
+remaining depth error is the **per-frame anchor** (raw z 2.67%); the run-2 law is that per-frame
+quantities need per-frame mechanisms. TA-DETR's terrain mechanism is the strongest possible per-frame
+mechanism: because the terrain is built from the **same per-segment VGGT reconstruction the labels live
+in**, a ray–terrain depth lands **directly in the label gauge — the anchor problem dissolves by
+construction** rather than being regressed. The price is circularity (terrain and labels share VGGT),
+which the spec's independent-terrain arm defends. The north star is unchanged: ONE elegant monocular
+model, 3D box AND heading co-equal, 13.17 3D AP / 8.68 BEV@0.50 to beat.
+
+## Verified data reality (disk census, 2026-08-26 — two read-only agents; nothing needs regenerating)
+
+**The feasibility question is settled: dense VGGT outputs exist for 345/345 segments.**
+
+| spec asset | verdict | where / format |
+|---|---|---|
+| depth D_t + confidence C_t | **EXISTS** | `/mnt/d/3DBOX/Data/WildBox/data/<shoot>/WildBox_sam3-vggtv1_processed/WildBox/<video>/<seg>/vggt_results/depth_maps.npz`, keys `depth`,`depth_conf`, (N,294,518) f32, conf ∈ ~[1.0,5.2] (existing readers threshold 1.5). 56.1 GB, 60,116 frames, 345 segments, 11 shoots ↔ the 11 papersubdata groups |
+| pointmaps P_t [H,W,3] | **DERIVABLE (exact, 1 line)** | `unproject_depth_map_to_point_map(depth, extrinsic, intrinsic)` — `vggt/vggt/utils/geometry.py:15`, the literal function that made the stored PLYs. `vggt_metadata.json` says `use_point_map:false` BY DESIGN (depth+unproject is the more accurate branch). Never store 110 GB of pointmaps; derive per segment on the fly |
+| poses T_t | **EXISTS** | `cameras.json` per frame: `extrinsic` (3,4) world→cam OpenCV; **frame 0 = identity ⇒ world = camera-0 frame**, per-segment arbitrary scale |
+| intrinsics K_t | **EXISTS** | `cameras.json` `intrinsic` (3,3) **in 518×294 pixel space** (cx=259.0, cy=147.0 exactly) |
+| masks | **EXISTS** | `sam3_masks/masks/obj_<track_id>/frame_%06d.png`, 1920×1080 binary {0,255}, ~12 MB/seg. ⚠ spec says "Grounded-SAM": on disk they are **SAM3**; the baseline-parity 2D detections are the frozen **GroundingDINO oracle jsons** (`gdino_WildBox_val_*_oracle_2d.json`). Both exist; do-not-regenerate honored |
+| human-corrected labels | **EXISTS 287/345** | `vggt_results/annotations/{tracking_summary.json, corrections.json}` — canonical rotations; top-level tracking_summary is raw pipeline output (spec's provenance-stratification arm is directly servable) |
+| point_cloud.ply | disposable | 179.5 GB of derived redundancy (50%-conf-filtered, unindexed) — never read |
+| CUT3R (independent arm) | **EXISTS (partial)** | `/mnt/d/3DBOX/Results_13_04_26_CUT3R/results/<scene>/{depth,conf,point_clouds*}` — prefer over the spec's COLMAP for the circularity defense (already computed, different backbone); COLMAP demoted to optional third arm |
+
+**Integration gotchas (M1 asserts these over ALL segments; partially verified 2026-08-26):**
+1. **294×518 ↔ 1920×1080 mapping.** VERIFIED: the 518-space system is internally self-consistent —
+   GT 3D centers projected with the 518-space cameras.json K land on the tracking_summary `bbox_2d`
+   centers to **median 0.84 px / p90 1.26 px** (zebr3/DJI_20250802084740_0006_V/seg1). NOT yet settled:
+   the exact 518→full-res mapping. **Working hypothesis: PER-AXIS scaling** sx=1920/518, sy=1080/294 —
+   the full-res json K has cx=960=259·sx and cy=540=147·sy **exactly** — versus uniform ×(1920/518)
+   with ~2 letterboxed bottom rows; the two differ by only ~0.9% in y, below `check_scale`'s 6% tol, so
+   neither prior test distinguishes them. **M1 gate A resolves this at the pixel level** (it matters for
+   resampling the 1920×1080 SAM3 masks onto the 294×518 depth grid; a 15 px dilation covers ±3 px of
+   residual error either way). Guard pattern: `papersub.check_scale`
+   (`DetAny3D/tools/heading/papersub.py:320`).
+2. **papersubdata has NO dense outputs.** The detector jsons' `file_path` uses `<group>/<video>/<seg>/`;
+   the dense tree uses `<shoot>/…/WildBox/<video>/<seg>/`. Join on the (video, seg) basename pair
+   (video names are the same DJI_* dirnames in both trees); `/mnt/d/3DBOX/wildbox_alias_map.json` maps
+   shoot⇄group; `tools/remap_wildbox_paths.py` does basename auto-repair.
+
+## The gauge bridge — VERIFIED EXACT (2026-08-26, one CPU minute)
+
+WildBox labels live in per-frame **camera** coordinates, per-segment scale-normalized (median z ≡ 1).
+VGGT terrain lives in the segment's **world = camera-0** frame at VGGT's own scale. Measured on
+zebr3/DJI_20250802084740_0006_V/seg1 (2,332 matched annotations, human-corrected tracking_summary):
+
+- `center_cam = s_seg · (extrinsic_t @ center_world)` holds to **median 0.00% / p90 0.00% 3-axis
+  relative error** (n=334). The bridge is exact, not approximate.
+- **s_seg = 1.0433, sd(log) = 0.0024** — a clean per-segment constant (p5–p95 collapse to 4 decimals).
+- The json annotations carry **`track_id` directly** — production joins on
+  (video, seg, track_id, frame); no IoU matching needed (the build_heading_labels.py join key).
+
+The terrain cache stores s_seg (median ratio over the segment's matched annotations). Ray-casting runs
+in VGGT world coordinates; returned depth × s_seg is in the label gauge. **This is why terrain
+dissolves the per-frame anchor by construction** — and the M1 unit test (median |signed distance from
+GT bottom-face center to terrain| / H < 0.3 on the label-sane train split) validates the entire chain
+(K-space bookkeeping, extrinsics, s_seg, grid) end to end.
+
+**M1 GATE PRE-VALIDATED on one segment (2026-08-26, CPU prototype, same segment as above):** background
+points (conf ≥ 1.5, animal boxes dilated out, pad rows cropped) → PCA ground frame → 256² median height
+grid → GT bottom-face centers (`up = −R_cam[:,1]`, junk-filtered) tested against it:
+
+| | median \|off\|/H | p90 | frac < 0.3H |
+|---|---:|---:|---:|
+| **terrain height field** | **0.077** | **0.211** | **95.2%** |
+| flat plane (best single plane) | 0.078 | 0.339 | 89.0% |
+
+Gate margin ~4× on the median; terrain beats the plane exactly in the TAIL (relief), as designed.
+Two builder lessons: (a) **cells directly under animals are empty by construction** (that's where
+background was masked) — the spec's nearest-neighbor fill + Laplacian smoothing is load-bearing (my
+crude 5×5 fill resolved only 977/2257 lookups); log per-segment fill fraction; (b) this zebra segment
+is near-flat (background plane residual sd 0.0057 VGGT units ≈ 0.1 animal heights) — flag high-relief
+segments in the M1 census, where the terrain-vs-plane gap should be largest.
+
+## Spec amendments (session-measured; each replaces the spec's text where they conflict)
+
+| # | spec says | amended to | why (measured) |
+|---|---|---|---|
+| 1 | yaw head = (sin,cos), L1 vs GT R | **axis × sign factorization**: dense axis mod π as doubled-angle (sin 2ψ, cos 2ψ) from all boxes, species-weighted (elephant/rhino full, zebra down-weighted, **giraffe excluded**); sign trained ONLY on the 9,887 motion labels (`tools/aeroview/data/heading_labels_min.npz`, masked loss). α = axis ⊕ sign at inference | GT R is PCA-sign-arbitrary (10.9% frame flips); NHD/IoU/BEV are exactly 180°-flip-blind, so the specced head would silently learn nothing directional — the AeroView core theorem |
+| 2 | eval = detection only | **add orientation eval as first-class**: `grade_orientation.py` per-species vs train-transferred constant floors, track-clustered CIs; predictions must carry `alpha` (evaluator whitelist trap) | north star: box AND heading co-equal; spec had a yaw head but no orientation grading at all |
+| 3 | contact_uv from "box bottom-face center" | bottom-face center = `center_cam − (H/2)·up` with **`up = −R_cam[:,1]`** | +R_cam[:,1] is the verified arrow-inversion bug (0.0% vs 100.0% objective test); `center_cam` is the VGGT centroid, not the bottom |
+| 4 | terrain unit test over all GT | test AND contact/depth training targets **exclude the junk population** (\|off-plane\|>1.0H per segment — human-audited 95% fragments; ~62% of gazelle train, dense-rhino clusters) via the existing `valid3D=false` mask machinery (`stamp_geometry.py`) | otherwise the 0.3H gate fails spuriously on rhino/gazelle and trains on garbage contacts |
+| 5 | Gate 1 band "5.97–11.48" | **Gate 1 = NHD-z(geometric_lift, GT-2D) ≤ 6.5; strong pass < 5.9**; plus grade_detection_sane z columns (references: run1 raw z 2.67%, anchor-free 1.09% — terrain should attack the RAW number) | measured fine-tuned band this session: 5.878/5.970/6.173/6.494; 11.48 is the zero-shot z — not a pass |
+| 6 | compute "A100-40GB or 2×4090, bf16" | **A40-48GB** (contended): bf16 autocast + fp32 intersection as specced. **V100-16GB fallback: full fp32 only** (Volta has no bf16; fp16 once silently zeroed a ViT-L forward), batch 4 + accum 4. Input **1022 px** (73×14 — 1024 is not divisible by 14). DINOv2 ViT-L/14 weights already on cluster | cluster reality; the fp16 landmine is measured |
+| 7 | baseline row "DetAny3D-FT (1.99 / 4.15)" | DetAny3D-FT measured macro **BEV 8.33@0.25 / 1.99@0.50** (from /mnt/d/PAPER_FINAL runs); OVMono3D-LIFT 13.17 3D AP / 8.68 BEV@0.50 (3-seed means) | session-measured record |
+| 8 | "Grounded-SAM masks/detections" | masks on disk = SAM3 (per-object PNGs); parity detections = frozen gdino oracle jsons; swap-in mode for a DETR = **box-conditioned queries** (init query anchors from the provided 2D boxes, one query per box, matching skipped) | disk reality + the only honest way to feed a DETR external 2D |
+| 9 | herd scale "resolves metric scale" | in the WildBox gauge, `lscale_s` resolves the **residual segment gauge**, not metric scale (labels are scale-normalized; metric is out of scope — settled). The 1/√N shrinkage prediction remains testable within-gauge; telemetry-altitude metricization is a v0.2 note. D̄_s / Σ_s computed from **label-sane train** only | the settled-gauge facts |
+| 10 | telemetry [sin pitch, cos pitch, roll, log alt] | keep, with measured coverage: gimbal pitch on **23/63 videos** only (_D series + 4 KABR); roll ≈ 0; rel_alt in the full `/mnt/d/aeroview/telemetry.npz`; fx_tel = focal_len/36 × width is EXACT and is the **camera-token** K; the json K stays the **label-gauge** K (two roles, never mixed) | Phase-A telemetry facts |
+
+## THE BUILD PLAN (2026-08-26; Plan-agent design + user decisions folded in)
+
+> **STEP 0 ON APPROVAL (context-loss-proofing, the standing practice):** (1) write the verbatim spec
+> (preserved this session at `scratchpad/tadetr_spec_verbatim.md`) to `tadetr/TADETR_SPEC.md`;
+> (2) append this whole TA-DETR section to `/home/shuklva/DetAny3D/AEROVIEW_PLAN.md` and
+> `/mnt/d/aeroview/plan_backup/AEROVIEW_PLAN.md`; (3) update memory
+> (`aeroview-monocular-viewpoint.md` + index) to point at the TA-DETR section; commit.
+
+### User decisions (asked and answered 2026-08-26)
+- **Code lives INSIDE the ovmono3d repo**: `tadetr/` (model package, ZERO cubercnn/detectron2 imports)
+  + `tools/tadetr/` (builders/eval glue, may import cubercnn) + `configs/tadetr/`.
+- **AeroView run-3**: not launched now (user not connected to the GPU). It stays fully specced above;
+  all its inputs are already on the cluster, so it can start any time with **no new transfer**.
+  TA-DETR's A5 ablation (direct-z control) is its architectural cousin either way.
+
+### Fixed engineering decisions
+| decision | choice | why |
+|---|---|---|
+| training loop | plain PyTorch (`tools/tadetr/train_tadetr.py`); cubercnn touched only at the eval boundary (`instances_predictions.pth` is framework-agnostic) | a DETR inside detectron2 drags conventions for zero gain |
+| input size | **1022×574** (73×14 × 41×14), per-axis resize from 1920×1080, K updated per-axis | 1024 not divisible by 14; square letterbox would waste ~44% of tokens on padding |
+| deformable attn | vendor the **pure-pytorch MSDA core** (`DetAny3D/detect_anything/modeling/ops/functions.py:46-68`, grid_sample-based) + MSDeformAttn module with the ext_module call replaced. **Do NOT import** (mmcv at module top). Single stride-14 level (73×41=2,993 tokens) makes its overhead trivial | NO pip on cluster ⇒ no CUDA extension builds |
+| DINOv2 | vendor `detect_anything/modeling/backbones/dinov2.py` + `metadinov2/` (xformers optional via try/except; ViT-L uses plain MLP); weights: cluster `/storage3/3DOM/vshukla/DetAny3D/.../dinov2_vitl14_pretrain.pth` | no network on cluster; already-proven vendored code |
+| telemetry/camera tokens | appended to the **decoder self-attention KV set** — NOT to deformable memory | deformable sampling can only reach grid tokens; the spec's "append to encoder memory" is unreachable there (spec bug, caught in design) |
+| 2D box head | **ADDED** (cxcywh; L1 2.0 + GIoU 1.0) | spec omission: 2D-only matching needs a GIoU source before 3D heads train, and every prediction record/grader needs `bbox` |
+| terrain shipping | build locally → **rsync** `datasets/tadetr/terrain/` (~300 MB) to cluster; commit only `terrain_MANIFEST.json` (sha256 + stats per segment) | 300 MB in git bloats every clone forever |
+| independent-terrain arm | **CUT3R first** (`/mnt/d/3DBOX/Results_13_04_26_CUT3R/results/`, already computed, different backbone); COLMAP optional third arm | same circularity defense, zero compute |
+
+### Repo layout (all new files)
+```
+tadetr/
+  config.py                      # dataclass+yaml; every ablation A0–A6, curriculum stage, V100 mode = a flag
+  data/resolution.py             # the M1-resolved 518↔1920 mapping constants + K-rescale helpers
+  data/wildbox_paths.py          # (video,seg) join: omni3d file_path ↔ dense tree ↔ shoots via wildbox_alias_map.json; basename repair per tools/remap_wildbox_paths.py
+  data/terrain_cache.py          # terrain npz contract v1 (below): writer + torch loader
+  data/dataset.py                # emits the sample format; joins stamped jsons + terrain + telemetry; honors valid3D junk mask
+  data/transforms.py             # RRC(0.7–1.0)+hflip+photometric; ABSOLUTE intrinsics rule (K, contact_uv, camera token co-transform); hflip: u→1−u, α→−α, ψ→−ψ, roll→−roll
+  data/samplers.py               # segment-grouped sampling: 4 frames/segment per batch group
+  geometry/unproject.py          # depth→cam→world (preflight-asserted == vggt.utils.geometry.unproject_depth_map_to_point_map)
+  geometry/rays.py               # batched pixel→world rays; O(1)-standardized camera-token features (law: roi_heads.py:414-463)
+  geometry/heightfield.py        # TerrainField: world→tangent-grid, F.grid_sample bilinear H/H_var, central-diff normals, plane-fallback mask
+  geometry/intersect.py          # 64-sample coarse march [0.2·h_cam, 5·h_cam] + 8 unrolled secant iters; fp32 island; clamp sin(θ_g)≥0.05; plane fallback
+  geometry/lift.py               # geometric_lift(...) → {center3d_world, t*, σ_z}: THE module (A0 = in-network intersection layer, written once)
+  modeling/dinov2/  ops_msda.py  backbone.py   # frozen ViT-L taps {12,18,24} → 1×1 proj 256 → top-down sum, single stride-14 map; LoRA-r16 flag (post-M3)
+  modeling/transformer.py        # 6 layers, 300 queries, 8 heads; per layer: self-attn(KV ∪ {telemetry,camera}) → deform cross-attn → herd sub-layer (+2.0 same-class bias, straight-through argmax from prev-layer logits) → FFN
+  modeling/heads.py              # class, box2d, contact, contact_sigma, height_residual, center_offset, dim_residual, axis(sin2ψ,cos2ψ), sign logit, rot_refine(6d, identity-init)
+  modeling/herd_scale.py         # per-(image,species) attn pool → (μ,logσ²); reparam; D̄_s/Σ_s buffers from label-sane train stats
+  modeling/matcher.py            # Hungarian: 2·CE + 5·L1(contact_uv) + 2·(1−GIoU(box2d)); 2D-only by construction
+  modeling/criterion.py          # amended losses (below) + deep supervision; masked-loss idiom (a batch with zero sign labels OMITS the key)
+  modeling/detector.py           # wiring + composed center: ray→intersect→+δh·n→+R_tan·o; oracle-2D box-conditioned query mode
+  utils/rot.py                   # rot6d↔R, geodesic, tangent frame, axis⊕sign→yaw→R, allocentric α export (up = −R[:,1])
+tools/tadetr/
+  verify_resolution_mapping.py   # M1 gate A     build_terrain_cache.py         # M1 (LOCAL)
+  terrain_unit_test.py           # M1 gate B     stamp_contact_targets.py       # in-place stamp
+  build_telemetry_alt_bundle.py  # rel_alt → telemetry_alt_min.npz (committed)  stamp_telemetry_alt.py
+  run_geometric_lift.py          # M2/A0 → instances_predictions.pth            preflight_tadetr.py  # P1–P13
+  train_tadetr.py  eval_tadetr.py  build_herd_stats.py  terrain_cut3r.py  viz_tadetr.py
+configs/tadetr/  base.yaml a0.yaml…a6.yaml v100.yaml {cluster,local}_paths.yaml
+datasets/tadetr/terrain/         # built artifact (rsync'd); terrain_MANIFEST.json committed
+```
+
+### Terrain cache contract v1 (spec §0.2 + session-mandated additions ✚)
+`H_grid`(256² f32, height along terrain normal **in a plane-tangent frame** — ✚ VGGT world = camera-0
+frame, NOT gravity-aligned; spec's "grid the XY plane" is undefined there), `H_var`(256², inflated by
+1/mean-cell-conf), `n_points`✚, `grid_origin`, `grid_scale`, `R_grid`✚(rows e1,e2,n; n = RANSAC normal
+sign-matched to consensus box-up via `frame.py world_up_from_boxes`; assert angle < 10°), `plane`(RANSAC
+fallback), **`s_seg`✚** (gauge bridge, cross-asserted vs 1/median(z) within 2%), **`extrinsics`✚**
+(N,3,4 — the omni3d jsons carry none; the dataloader needs T per frame), `K_518`✚, `frame_names`✚,
+**`cam_height`✚** (per-frame camera height above terrain — the march bounds' "altitude" is THIS, not
+telemetry alt), `meta` (conf threshold, %filled, plane-fallback fraction, tracking-summary source:
+`annotations/` when present [287/345] else top-level, resolution record).
+Build: load npz (reader pattern `tracking_traj.py:95`) → unproject all frames → drop conf <
+max(1.5, p20) → remove animal px via SAM3 masks resampled by the M1-verified mapping, dilated 15 px →
+tangent frame → 256² conf-weighted median → NN-fill + Laplacian (λ=0.5, 20 it) → H_var → RANSAC plane
+(extract `_fit_ground_plane_ransac` from `wildlift/annotator/bbox_editor.py:1945`; hoist the
+vertical-axis check out of the loop; inlier threshold = 2% of median cam_height, NOT the GUI's 0.05 m).
+**Fill is load-bearing, not cosmetic — cells under animals are empty by construction (measured).**
+
+### Stamps (in-place, idempotent, `stamp_geometry.py` pattern; re-run identically on cluster jsons)
+Order: existing `stamp_geometry.py` (geo + junk mask) → existing `build_heading_labels.py` (9,887/7,460
+asserts) → new `stamp_contact_targets.py` (`contact_uv` = project `center_cam − (H/2)·(−R_cam[:,1])`
+with the json full-res K; `contact_valid` = valid3D ∧ ¬behind_camera) → new `stamp_telemetry_alt.py`
+(`geo_alt=[rel_alt_m, valid]`). Two K roles NEVER mixed: json-K = label-gauge geometry; fx_tel =
+camera-token feature only.
+
+### Milestones, placement, gates
+| M | what | where | gate |
+|---|---|---|---|
+| **M1** (wk 1) | resolution verification + terrain caches ×345 + stamps + terrain unit test | **LOCAL CPU** (56 GB npz exist only on /mnt/d) | **Gate A**: mapping residual < 2 px (518-space) on ≥340 segments → constants into `resolution.py`. **Gate B**: median \|dist(GT bottom-face center, terrain)\|/H < 0.3 on junk-excluded train (pre-validated 0.077 on one segment); per-segment histograms; s_seg recovered ≥330/345; §0.1 consistency census (reprojection residual, high-rotation flags; `problem segments.txt` as skip-list input) |
+| **M2** (wk 2) | `geometry/{rays,heightfield,intersect,lift}.py` + `run_geometric_lift.py` + preflight suite | LOCAL CPU (val = 13,779 images, closed-form lift) | **Gate 1 (corrected)**: NHD-z(A0, gt2d mode) **≤ 6.5**, strong pass **< 5.9** (measured fine-tuned band 5.878–6.494; zero-shot z≈11.48 is NOT a pass) + sane-grader z columns (run1 refs: raw 2.67%, anchor-free 1.09% — terrain attacks the RAW number). Protocol: `run_geometric_lift.py --mode gt2d\|gdino` → `.pth` → `tools/eval_ovmono3d_geo.py` (Omni3DEvaluationHelper; run from a work dir with the wildlife6 `configs/category_meta.json` — THE trap) + `grade_detection_sane.py` + `bev_ap_eval.py`. A0 dims = label-sane per-class train means; pose = terrain-normal frame, yaw 0, α = 0 |
+| **M3** (wk 3–4) | full model + A1 (curriculum stage 1: class+box2d+contact only) | **CLUSTER A40** (bf16 + fp32 intersection island; batch 8 = 2 seg × 4 frames, accum 2 → eff 16; `v100.yaml` = full fp32, batch 4, accum 4 — never fp16 on Volta); sbatch pattern `tools/run_multi_seed.sbatch` | preflight P1–P13 green BEFORE the first GPU hour; **A1 ≥ A0** on NHD-z and BEV@0.50, own-detections AND oracle-2D parity; if A1 < A0 → debug matcher/intersection gradients (spec stop-rule) |
+| **M4** (wk 5–6) | A2 (+δh, center_offset) → A3 (+dim_residual, herd OFF); rot_refine on | cluster | monotone A0→A3; orientation eval reported alongside (co-equal) |
+| **M5** (wk 7–8) | A4 herd module + calibration | cluster | `lscale_s` posterior std shrinks ~1/√N_s (within-gauge claim); ECE/reliability |
+| **M6** (wk 9–11) | A5 (direct-z control), A6 (telemetry zeroed), CUT3R arm, provenance split (287 corrected vs 58 raw segs), writing | mixed | terrain-vs-CUT3R deltas reported; paper story A0→A4 monotone, A5 worse |
+
+### Amended heads/losses (replaces spec §2.3 "yaw" + §3.6)
+class(focal 2.0) · box2d✚(L1 2.0 + GIoU 1.0) · contact(L1 5.0 + NLL 0.5, `contact_valid` only) ·
+contact_sigma(softplus+0.5) · height_residual(via depth loss) · center_offset(x,y L1 1.0) ·
+dim_residual(log-dims L1 1.0 + prior NLL 0.1 + lscale prior 0.1 + KL 0.05, free-bits 0.5 nats) ·
+**axis✚**((sin 2ψ, cos 2ψ) vs GT box axis mod π; species weights: elephant/rhino 1.0, zebras 0.5,
+**giraffe 0.0** (neck breaks PCA), **gazelle 0.0** (worst GT, near-null motion agreement); λ 1.0) ·
+**sign✚**(1 logit, BCE vs motion labels, masked to `heading_valid` — 9,887 instances; λ 0.5) ·
+rot_refine(geodesic 0.5, post-M3) · depth = NOT a head: z L1 in label gauge (`z = s_seg·(E_t@p*)_z`,
+λ 2.0) + Laplacian NLL 0.5 · deep supervision at every decoder layer.
+Export composes `R = R_tangent(n) ∘ Rot_up(ψ + π·[sign<0]) ∘ ΔR_refine` and writes **`alpha`**
+(allocentric, up = −R[:,1]) into every prediction record (the evaluator whitelist carries it,
+`omni3d_evaluation.py:1174`). Why: GT R is PCA-sign-arbitrary; raw yaw supervision fails SILENTLY
+because NHD/IoU/BEV are exactly 180°-flip-blind — the AeroView core theorem.
+
+### Eval rows & columns (amends spec §5)
+Rows: zero-shot (0.00; z≈11.48) · **OVMono3D-LIFT FT 13.17 AP3D / 8.68 BEV@0.50 (to beat)** ·
+DetAny3D-FT measured 8.33@0.25 / 1.99@0.50 · A0(gt2d) · A0(gdino) · A1…A6.
+Columns: BEV@0.50/0.25 macro, AP3D, NHD decomposition, sane-grader (z-raw / z-anchor-free / dims / xy),
+**orientation per-species sign+flank vs train-transferred floors, track-clustered CIs, band-resolved**
+(`grade_orientation.py`), ECE, plane-fallback fraction. Parity mode = box-conditioned queries (one query
+per provided box, reference = box bottom-center, matching skipped, class from oracle). 3 seeds for
+headline rows (the standing rule).
+
+### Preflight suite P1–P13 (`preflight_tadetr.py`, CPU, before ANY GPU hour)
+P1 hflip→contact_u=1−u through the real pipeline · P2 hflip→α=−α · P3 hflip→axis (−sin2ψ,cos2ψ) ·
+P4 K/aug round-trip: transformed-K projection of GT bottom center == transformed contact target <0.5 px ·
+P5 s_seg recovery on synthetic rescale <1% · P6 ∂t*/∂contact_uv (unrolled secant) vs finite difference
+rel<1e-3 fp32 · P7 O(1) audit: every model input |x|≲3 on a real batch (the frozen-training lesson) ·
+P8 init-equivalence: residual heads zeroed ⇒ network center == geometric_lift center <1e-4 ·
+P9 edge cases: grazing→plane fallback no-NaN; invalid telemetry→embedding; zero sign labels→loss key
+OMITTED · P10 matcher determinism · P11 vendored MSDA vs fixtures + grad flow · P12 join audit: every
+train/val image resolves to terrain npz + extrinsic row + stamped fields (fail loudly, list misses) ·
+P13 vendored unprojection == vggt's on one real segment (local, 1e-6).
+
+### ⭐ TRANSFER MANIFEST (local ⇄ cluster — the user asked for this explicitly)
+| item | size | direction | mechanism | when |
+|---|---|---|---|---|
+| `datasets/tadetr/terrain/` (345 npz) | **~300 MB** | local → cluster | `rsync -av --partial datasets/tadetr/terrain/ vshukla@<host>:/storage2/3DOM/vshukla/repos/ovmono3d/datasets/tadetr/terrain/` | once, after M1 — **the ONLY bulk transfer in the whole project** |
+| code, configs, `telemetry_alt_min.npz` (0.05 MB), `herd_stats.json`, `terrain_MANIFEST.json` | KBs | local → cluster | git push/pull (the existing workflow) | continuous |
+| stamped json fields | — | none | stamp scripts re-run on cluster jsons (idempotent, numpy-only, no pip) | before M3 |
+| `gdino_WildBox_val_{novel,base}_oracle_2d.json` | few MB | cluster → local | scp (2 files) | before M2's gdino mode |
+| `depth_maps.npz` (56 GB), `point_cloud.ply` (180 GB) | — | **NEVER transferred** | terrain caches are their only derivative | — |
+| AeroView run-3 | — | none needed | all inputs already on cluster; launch whenever next connected | user's call |
+
+### Risks
+1. Resolution mapping (M1 gate A blocking; per-axis hypothesis already evidenced by exact K ratios;
+   only mask resampling ±3 px rides on it, inside the 15 px dilation). 2. MSDA-without-compilation
+   (single 73×41 level → trivial overhead; fallback flag: plain cross-attention decoder, measured in the
+   M3 smoke). 3. V100 = fp32-only spillover; A40 first. 4. Grazing-ray gradients (clamp + plane fallback
+   + log fraction). 5. Junk labels (excluded from terrain test AND contact/depth targets via valid3D, or
+   the 0.3H gate fails spuriously; val never edited). 6. Terrain circularity (CUT3R arm + explicit
+   statement: "labels derive from VGGT; the independent arm shows the mechanism is terrain-anchoring,
+   not backbone identity"). 7. Scale-posterior collapse (KL floor + free-bits; lscale = within-gauge).
+   8. VGGT pose degradation on high-rotation segments (census flags; Gate-1 outliers there → exclude,
+   report as operating envelope).
+
+### Spec under-specifications — RESOLVED (technical calls, evidence in-session)
+2D box head ADDED · terrain grid in plane-tangent frame with stored `R_grid` · per-frame `extrinsics`
+travel in the terrain cache (omni3d jsons carry none) · march-bound "altitude" = cache `cam_height` ·
+species contact-offset fallback table derived from train stats in M2 · gazelle axis weight 0.0 ·
+terrain ships by rsync; repo = ovmono3d subpackage (user) · eval on **val** (no test split exists
+locally; the project-wide convention) · CUT3R scene↔segment mapping built in M6, partial coverage
+reported honestly · gdino oracle jsons copied local for M2 · "Grounded-SAM" terminology → SAM3 masks +
+GroundingDINO oracle detections.
+
+### Verification (how the whole build is tested end to end)
+1. **M1 gates A+B** validate every data assumption before any model code runs (mapping, s_seg,
+   extrinsics, junk mask, grid) — Gate B pre-validated at 0.077 median on one segment.
+2. **Gate 1** (M2) validates the entire depth mechanism training-free against the measured fine-tuned
+   band — if terrain can't beat 6.5 NHD-z with GT 2D, stop before spending a GPU hour.
+3. **P1–P13 preflights** validate the training-time machinery (flips, gradients, O(1) inputs,
+   init-equivalence, joins) on CPU seconds.
+4. **A1 ≥ A0** (M3) is the first learned-vs-geometric gate; ablation monotonicity (M4–M6) and the
+   A5 direct-z control isolate WHERE any gain comes from.
+5. Every headline row: official evaluator + BEV + sane grader + orientation grader, 3 seeds, vs the
+   frozen baselines (13.17/8.68; floors per species) — the same two-task scorecard discipline as
+   AeroView. Contact sheets via `viz_tadetr.py` at every milestone (never trust flip-blind metrics
+   alone — the standing lesson).
+
+
+---
+
+# APPENDIX — TA-DETR build specification v0.1, VERBATIM (user, 2026-08-26; source of truth for tadetr/TADETR_SPEC.md)
+
+I want to start a new project - 
+
+# TA-DETR — Terrain-Anchored Detection with Herd Scale Coupling
+## Build specification v0.1 (hand this to the coding agent)
+
+**Working name:** TA-DETR (Terrain-Anchored DETR).
+**One-line goal:** A monocular 3D detector for aerial wildlife video that never regresses depth. It predicts a 2D ground-contact point per animal, computes depth by differentiable ray–terrain intersection, and resolves metric scale jointly across all same-species animals in the scene.
+
+**Non-goals for v0.1:** no tracking, no temporal fusion, no onboard/edge optimization, no new species beyond WildBox classes, no backbone training from scratch.
+
+---
+
+## 0. Data contracts (build these first, everything depends on them)
+
+### 0.1 Inputs available
+- WildBox dataset: KITTI/Omni3D-format 3D boxes, per-segment scale-normalised camera frame, instance IDs per segment, video-level train/val/test splits, official eval code.
+- Per-segment VGGT outputs (already produced by the VGGT-based WildLIFT pipeline; labels live in this frame): per-frame pointmaps `P_t [H, W, 3]` (confirm camera vs world frame and record), per-point confidence `C_t [H, W]`, camera poses `T_t ∈ SE(3)`, recovered intrinsics `K_t [3,3]`. (these outputs for the corresponding wildbox data can be found here mnt\d\3DBOX\Data\WildBox\data)
+- Consistency check (blocking, run once): each segment's poses/pointmaps must share one global frame. If VGGT was run in chunks, store the chunk-alignment transforms and assert boundary residuals < 1 percent of median camera height. Add per-segment mean reprojection residual to the feasibility census; flag high-rotation segments.
+- Grounded-SAM 2D masks per frame (same detections used in the WildBox baselines — do NOT regenerate).
+- Gimbal telemetry per segment where available: pitch, roll, altitude (DJI SRT). May be missing; all telemetry-consuming code must handle `None`.
+
+### 0.2 Terrain cache (precompute once per segment, offline job)
+File: `terrain/{segment_id}.npz`
+- `H_grid  [G, G] float32` — terrain height field over the segment's ground footprint. Build: accumulate all non-animal pointmap points across the whole segment (animal pixels removed via dilated masks, dilation 15 px), grid the XY plane at resolution `G = 256`, per-cell robust height = confidence-weighted median of points in cell (weights = VGGT per-point confidence, drop points below the 20th confidence percentile), fill empty cells by nearest-neighbor then apply Laplacian smoothing (lambda = 0.5, 20 iterations). Store also:
+- `grid_origin [2]`, `grid_scale [1]` — XY-to-cell mapping.
+- `H_var [G, G] float32` — per-cell height variance, inflated by (1 / mean cell confidence); used by the uncertainty head and for masking unreliable terrain.
+- `plane [4] float32` — best-fit plane (RANSAC, inlier threshold = 2 percent of median camera height) as fallback where `H_var` is high or cells empty.
+- Unit test: for every ground-truth box in the segment, signed distance from box bottom-center to terrain, normalised by box height. Assert median |distance| < 0.3 across the train split; log per-segment histograms. (Owner has verified labels sit on terrain; this test guards regressions.)
+
+### 0.3 Sample format the dataloader emits
+```
+image        [3, 1024, 1024]   resized, intrinsics rescaled accordingly
+K            [3, 3]
+T_cam2world  [4, 4]
+terrain      dict: H_grid, grid_origin, grid_scale, H_var, plane   (torch tensors, on GPU)
+telemetry    [4]  = [sin(pitch), cos(pitch), roll, log(altitude_m)]  or zeros + valid flag
+targets      list of {cls, box3d(10: c[3], d[3], R as 6d rot), box2d[4], contact_uv[2], instance_id}
+segment_id, frame_id, species_present [S]  (multi-hot)
+```
+`contact_uv` targets: project GT box bottom-face center into the image with `K, T`. Precompute in the dataset builder, not at train time.
+
+---
+
+## 1. Stage 1 — training-free baseline as a frozen module (week 1)
+
+Implement `geometric_lift(mask_or_box2d, K, T, terrain) -> {center3d, sigma_z}` exactly as in the training-free paper:
+1. Contact pixel = centroid of the lowest 10 percent of mask pixels (fallback: box bottom-center + species offset table).
+2. Ray `p(t) = o + t d` from camera center through contact pixel.
+3. Root of `f(t) = p_z(t) − H(p_xy(t))` by: coarse march (64 samples between t_min = 0.2·altitude and t_max = 5·altitude), then 8 secant iterations. Bilinear interpolation on `H_grid`.
+4. `sigma_z = (z / f_focal) · sigma_px / sin(theta_g)` where `theta_g` = angle between ray and local terrain tangent plane (normal from `H_grid` central differences), `sigma_px = 2.0` default.
+
+This module is (a) ablation A0, (b) the initialization/sanity oracle, (c) reused inside the network as the intersection layer (Section 2.3). Write it once, in PyTorch, batched, differentiable (no `.item()`, no numpy in the forward path).
+
+**Gate 1:** with GT 2D boxes on WildBox val, NHD-z of `geometric_lift` must land at or below the published fine-tuned band (5.97–11.48). If not, stop and debug terrain/frames before any training.
+
+---
+
+## 2. Stage 2 — the model
+
+### 2.1 Backbone + encoder
+- Backbone: DINOv2 ViT-L/14, frozen. Extract patch tokens from layers {12, 18, 24}, project each to `d = 256`, fuse by simple FPN-style top-down sum at stride 14.
+- Optional (flag): LoRA rank 16 on the last 8 blocks, enabled only after milestone M3.
+- Telemetry token: MLP(4 -> 256), appended to encoder memory. Camera token: MLP(flattened normalized K + camera height above terrain -> 256), appended likewise. If telemetry invalid, use a learned `no_telemetry` embedding.
+
+### 2.2 Decoder and queries
+- Standard deformable-DETR decoder, 6 layers, `d = 256`, 300 object queries, 8 heads.
+- Insert one extra cross-instance attention sub-layer per decoder layer (after cross-attention, before FFN): queries attend to each other with an additive species-gate bias `b_ij = +2.0 if argmax cls_i == argmax cls_j else 0` (computed from the previous layer's class logits, straight-through). This is the herd-coupling pathway.
+
+### 2.3 Heads (per query, after final decoder layer)
+| Head | Output | Notes |
+|---|---|---|
+| class | S+1 logits | WildBox 6 classes + no-object |
+| contact | (u, v) in [0,1]^2 | sigmoid; supervised by `contact_uv` |
+| contact_sigma | sigma_px > 0 | softplus + 0.5 |
+| height_residual | delta_h | contact height above terrain, in units of median camera height; tanh-bounded to [−0.05, 0.15] |
+| center_offset | o_xyz [3] | box center minus contact point, in the terrain-tangent frame; bounded |
+| dim_residual | dhat [3] | per-instance log-dimension residual (see 2.5) |
+| yaw | (sin, cos) | rotation about local terrain normal |
+| rot_refine | 6d rotation delta | small SO(3) correction on top of terrain-normal + yaw; identity-init |
+
+**Depth is NOT a head.** Center comes from:
+```
+ray      = unproject(contact_uv, K, T)
+t*       = intersect(ray, H_grid)            # module from Stage 1, differentiable
+foot3d   = ray(t*) + delta_h * n_terrain
+center3d = foot3d + R_tangent @ center_offset
+```
+Gradients flow into `contact_uv` and `delta_h` through the unrolled secant iterations (8 steps, no implicit-function shortcut in v0.1 — measure speed first, optimize later).
+
+### 2.4 Analytic uncertainty passthrough
+Per detection, compute `sigma_z_analytic` from the Stage-1 formula using the predicted `contact_sigma`. Final reported depth sigma = `sigma_z_analytic * exp(s_corr)` where `s_corr` is a single learned scalar per class (calibration correction). This keeps uncertainty interpretable: geometry sets the shape, learning sets one gain.
+
+### 2.5 Herd latent scale module
+Per (image, species s) with at least one query assigned to s:
+```
+g_s   = attention-pool over queries of species s (learned query vector per species)
+mu_s, logvar_s = MLP(g_s)                       # posterior over log-scale
+lscale_s ~ N(mu_s, exp(logvar_s))               # reparameterized sample at train, mu at eval
+dims_i = exp(lscale_s) * exp(dhat_i) * D_bar_s  # D_bar_s = per-class mean dims from train-split stats (buffer, not learned)
+```
+Priors as losses (Section 3): `lscale_s ~ N(0, 0.15^2)` and `dhat_i ~ N(0, Sigma_s)` with `Sigma_s` = per-class log-dim covariance from train-split stats (buffer). Interpretation: the scene shares one scale per species; individuals deviate within allometric variance. Prediction to verify later (paper figure): posterior std of `lscale_s` shrinks ~ 1/sqrt(N_s).
+
+---
+
+## 3. Matching and losses
+
+Hungarian matching cost per (query, target): `2·CE(cls) + 5·L1(contact_uv) + 2·(1 − GIoU(projected 2D box, GT 2D box))`. Match on 2D quantities only — never on 3D — so matching stays stable while 3D heads are untrained.
+
+Total loss (lambda in parentheses):
+1. Focal class loss (2.0)
+2. Contact L1 (5.0) + contact NLL with `contact_sigma` (0.5)
+3. Depth: L1 on z in the segment-normalised frame (2.0) + Laplacian NLL with reported sigma (0.5)
+4. Center L1 on x, y (1.0)
+5. Dimensions: L1 on log-dims (1.0) + prior NLL on `dhat_i` (0.1) + prior NLL on `lscale_s` (0.1) + KL of scale posterior to prior (0.05)
+6. Rotation: yaw L1 on (sin,cos) (1.0) + geodesic loss on refined R (0.5), rot_refine enabled only after milestone M3
+7. Auxiliary decoder losses at every layer (standard DETR deep supervision)
+
+Do not add a 3D IoU loss in v0.1.
+
+---
+
+## 4. Training recipe
+
+- Optimizer AdamW, lr 2e-4 (heads/decoder), 2e-5 (LoRA when enabled), weight decay 1e-4, cosine schedule, 50 epochs, effective batch 16.
+- **Batch by segment**: each batch element is one frame, but sample 4 frames per segment per batch so the scale module sees multi-frame consistency pressure within a step (scale is per-image in v0.1; per-segment scale via EMA across frames of the same segment is v0.2).
+- Augmentations — the intrinsics rule is absolute: any crop/resize/zoom must transform `K`, `contact_uv` targets, and the camera token consistently. Allowed: random resized crop (scale 0.7–1.0), horizontal flip (flip yaw and telemetry roll sign), photometric jitter. Forbidden: vertical flip, rotation, any aug that breaks the gravity/terrain relationship.
+- Precision: bf16 autocast; the intersection layer runs in fp32 (root-finding is precision-sensitive).
+- Curriculum: epochs 1–5 train contact + class only (freeze 3D heads); epochs 6–15 add depth/center/dims with scale module frozen at mu = 0; epoch 16+ everything. Mirrors the WildBox finding that curriculum init helps.
+- Logging: per-epoch NHD decomposition (x, y, z, dims, rot) on val, calibration plot (predicted sigma_z bins vs empirical |error|), scale-posterior std vs N_s scatter.
+
+Compute budget: fits one A100-40GB or two RTX 4090s (frozen ViT-L, 1024 px, batch 16 with grad accumulation 4). Full run ≈ 20–30 h. Ablation grid ≈ 6 runs.
+
+---
+
+## 5. Evaluation
+
+- Primary: official WildBox eval code, untouched. Report AP-BEV@0.50 macro, AP3D macro, full NHD decomposition. Compare rows: published zero-shot (0.00), published fine-tuned OVMono3D-LIFT (8.68 / 13.17), published DetAny3D-FT (1.99 / 4.15), A0 (training-free), full TA-DETR.
+- Detection input parity: evaluate both with own detections and with the same Grounded-SAM detections as the baselines (swap-in mode) to isolate 3D-stage gains.
+- Calibration: reliability diagram of sigma_z; expected calibration error on depth.
+- Provenance stratification: separate metrics on human-corrected vs auto-accepted label frames (annotation metadata available from WildLIFT-A logs).
+- Independent-terrain arm (circularity defense — labels derive from VGGT, so VGGT terrain is the shared-backbone condition): rerun eval with terrain rebuilt from COLMAP on masked backgrounds (script `terrain_colmap.py`, similarity-aligned per segment to the label frame via camera trajectories). Optional third arm: CUT3R terrain (learned but different backbone). Report deltas across arms.
+
+---
+
+## 6. Ablation matrix (each is a config flag, build all from day one)
+
+| ID | Config | Question answered |
+|---|---|---|
+| A0 | geometric_lift on GT and on Grounded-SAM 2D | floor: geometry alone |
+| A1 | TA-DETR, contact head only, delta_h = 0, offsets = 0, dims = class means | does learned contact beat mask heuristic? |
+| A2 | + height_residual + center_offset | value of residual learning |
+| A3 | + dim_residual, scale module OFF (lscale = 0) | per-instance dims without herd coupling |
+| A4 | + herd scale module (full model) | value of herd coupling; check 1/sqrt(N) prediction |
+| A5 | full model, terrain replaced by direct depth head (regress z) | the control: is terrain the source of the win? |
+| A6 | full model, telemetry token zeroed | value of telemetry |
+
+Paper story = A0 -> A4 monotone improvement, A5 clearly worse, A4−A3 gap grows with group size.
+
+---
+
+## 7. Milestones and gates
+
+| # | Deliverable | Time | Gate |
+|---|---|---|---|
+| M1 | Data contracts + terrain cache + unit tests green | 1 wk | terrain-consistency test passes on train split |
+| M2 | Stage-1 module + Gate 1 numbers | 1 wk | NHD-z ≤ fine-tuned band with GT 2D |
+| M3 | A1 trains, matches/beats A0 on val | 2 wk | if A1 < A0, debug matching/intersection gradients before proceeding |
+| M4 | A2–A3 complete | 2 wk | monotone improvement |
+| M5 | A4 + calibration + herd figure | 2 wk | scale-posterior shrinks with N_s |
+| M6 | A5–A6, independent-terrain arm, provenance split, writing | 3 wk | — |
+
+Total ≈ 11 weeks with one person + agent; M1–M2 overlap with the training-free paper's experiments (same code).
+
+## 8. Known risks and pre-decided fallbacks
+
+- Intersection gradients unstable near grazing rays -> clamp sin(theta_g) ≥ 0.05 in the backward; detections below that threshold fall back to plane intersection.
+- Sparse background in close-up segments -> `H_var` mask triggers plane fallback per cell; log the fraction of plane-fallback detections and report it.
+- Scale posterior collapse (logvar -> −inf) -> KL term floor plus free-bits (0.5 nats).
+- Matching instability early -> curriculum already freezes 3D heads; if still unstable, add DN-DETR-style denoising queries (flagged, off by default).
+- VGGT chunk misalignment within a segment -> caught by the blocking consistency check in 0.1; remedy is re-running global alignment for that segment, never per-chunk terrain.
+- VGGT pose degradation on rapid-rotation segments -> census flags them; if Gate 1 outliers concentrate there, exclude and report as an operating-envelope limit rather than debugging indefinitely.

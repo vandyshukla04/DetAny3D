@@ -1959,3 +1959,20 @@ verified absent locally); the terrain rsync + json stamps + git pull (the M1 shi
 transforms/samplers, `train_tadetr.py`, full preflight P1–P12, then A1 (contact+class+box2d
 curriculum) on the A40 — gate: A1 ≥ A0 on NHD-z and BEV@0.50, own-detections AND box-conditioned
 oracle mode. The contact-convention decision (above) is the first M3 design item.
+
+
+## M2 addendum + M3 BUILT (2026-08-27)
+
+**A0 on REAL GroundingDINO detections (the swap-in parity row): NHD-z 6.079** (vs 5.317 with GT 2D;
+fine-tuned band 5.878-6.494) — the training-free depth mechanism survives real 2D detections inside
+the fine-tuned band. BEV macro 13.71@0.25 / 2.15@0.50 (~= the gt2d row: depth robust, footprint
+placeholders unchanged). 63,105 detections lifted, 51 plane-fallbacks.
+
+**M3 model package BUILT, 12/12 preflight PASS, CPU full-stack smoke green** (commit 8e16509).
+Vendored DINOv2 (weights found LOCALLY at ~/.cache/torch/hub, load clean) + pure-pytorch MSDA.
+Three measured build lessons: (1) F.normalize of a zero-init axis head has a singular gradient
+(5e12 measured) -> axis init std 0.001 + eps-clamped normalize; (2) contact sigma must START ~30 px
+or the pixel-NLL explodes at init (the run-2 O(1) lesson recurs); (3) telemetry/camera tokens moved
+to decoder self-attn KV (deformable sampling cannot reach off-grid tokens — spec bug).
+A1 recipe: 15 epochs, stride-2 frames, 2 seg x 4 frames + accum 2, bf16 + fp32 island,
+~2.9k iters/epoch. Launch: tools/tadetr/train_a1.sbatch. Gate: A1 >= A0 (5.317 NHD-z / 13.70 BEV@0.25).

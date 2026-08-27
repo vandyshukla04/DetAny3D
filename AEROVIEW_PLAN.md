@@ -1904,3 +1904,58 @@ cross-validated; val 100%), `geo_alt` (63/63 videos altitude, 23 roll) from the 
 (modes gt2d/gdino) + `preflight_tadetr.py`; **Gate 1 = NHD-z(A0, gt2d) ≤ 6.5, strong < 5.9** via
 `tools/eval_ovmono3d_geo.py` (wildlife6 category_meta work-dir trap) + `grade_detection_sane.py`
 (refs: run1 z-raw 2.67% / anchor-free 1.09%) — with the val envelope flag applied and reported both ways.
+
+
+# ★ TA-DETR M2 EXECUTION LOG (2026-08-27) — COMPLETE. GATE 1: STRONG PASS.
+
+**The headline: the training-free geometric lift BEATS every fine-tuned model's depth.**
+
+| depth metric (val, GT-2D protocol) | A0 no-offset (CANONICAL) | A0 + species offset | best fine-tuned (run1) | published seed0 |
+|---|---:|---:|---:|---:|
+| official disentangled NHD-z | **5.317** | 6.001 | 5.878 | 5.970 |
+| sane-grader z raw | **1.31%** | 2.04% | 2.67% | — |
+| sane-grader z anchor-free | 0.49% | 0.50% | 1.09% | — |
+
+**Gate 1 (bar ≤ 6.5, strong < 5.9): STRONG PASS at 5.317.** Zero training. 66,951/66,951 val
+annotations lifted, 0 skipped, 0.17–0.19% plane-fallback. The terrain-anchor thesis is now measured
+fact: depth from ray–terrain intersection in the label gauge beats depth regressed by the fine-tuned
+incumbent, because the per-frame anchor comes from the terrain rather than from the image.
+
+**The species-offset reversal — a real design finding for M3.** The Gate-B offset table (+0.11–0.14H
+for rhino/elephant) made A0 WORSE (2.04% vs 1.31%). Resolution: the **2D box bottom images the FEET**
+(full-res 2D segmentation sees legs), while the **3D GT box bottom sits at shin height** (518-res
+reconstruction loses thin legs — the M1 finding). So a ray through the 2D box bottom already hits the
+true ground: no offset needed. The offset describes the 3D-GT-vs-terrain bias only. ⇒ **M3 contact
+convention must be chosen as a pair:** either contact targets = 2D-box/mask bottom (no offset — the
+empirically better convention) or contact targets = projected 3D bottoms (stamped `contact_uv`) +
+species offset in the lift. Decide at M3 wiring; the stamped `contact_uv` carries the shin bias.
+
+**Other A0 rows (for the ablation table; expected placeholder costs, not claims):** overall NHD
+7.99/8.39; XY 3.32 (class-median-H center placement; run1 2.199); dims 1.90 (class medians; run1
+0.776); pose 1.70 (yaw-0 terrain frame; run1 0.560); BEV macro 13.70@0.25 / 3.07@0.50 (beats the
+trivial-predictor floor 12.62/2.31 on depth alone; footprint-blind by construction; fine-tuned
+24.31/8.20 is A1+'s target). Per-class prediction counts land exactly on the GT supports.
+
+**Preflight (4/4 PASS, must stay green):** P13 vendored unprojection == vggt (1.5e-8; run via the
+py3.12 vggt env — vggt needs py≥3.9); P14 torch bilinear == numpy (0.0); P15 one-segment lift smoke
+0.92% median z; P6 intersection gradient vs finite difference 2.0e-4.
+
+**Spec deviation, measured and adopted:** the spec's "gradients through the unrolled secant, no
+implicit-function shortcut" FAILS — at convergence the secant bracket collapses and autograd
+gradients come out ~100× too small (P6 caught it). Replaced with secant-for-value (detached) + one
+final Newton step using the analytic along-ray slope f'(t) = d_z − ∇H·d_ab, whose autograd gradient
+is exactly the implicit-function gradient. Validated to 2e-4 vs finite differences. Also: march
+t_max is per-ray adaptive (2·h_cam/max(|d·n|,0.1)) instead of the flat 5·altitude (3.4% of frames
+view below 8° where the flat bound is short).
+
+**Code:** `tadetr/geometry/{heightfield,intersect,lift}.py`, `tools/tadetr/{preflight_tadetr,
+run_geometric_lift}.py`, stats cache `tools/tadetr/data/a0_class_stats.json`. Commits `940d0ee` (+
+this log). Artifacts: `datasets/tadetr/runs/a0_gt2d*/` (pth + eval logs; local only).
+
+**Deferred to the next cluster session:** A0 on gdino detections (oracle jsons are cluster-only —
+verified absent locally); the terrain rsync + json stamps + git pull (the M1 ship list).
+
+**NEXT (M3):** model package (`backbone/transformer/heads/matcher/criterion/detector`), dataset/
+transforms/samplers, `train_tadetr.py`, full preflight P1–P12, then A1 (contact+class+box2d
+curriculum) on the A40 — gate: A1 ≥ A0 on NHD-z and BEV@0.50, own-detections AND box-conditioned
+oracle mode. The contact-convention decision (above) is the first M3 design item.

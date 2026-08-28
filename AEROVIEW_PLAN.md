@@ -1976,3 +1976,26 @@ or the pixel-NLL explodes at init (the run-2 O(1) lesson recurs); (3) telemetry/
 to decoder self-attn KV (deformable sampling cannot reach off-grid tokens — spec bug).
 A1 recipe: 15 epochs, stride-2 frames, 2 seg x 4 frames + accum 2, bf16 + fp32 island,
 ~2.9k iters/epoch. Launch: tools/tadetr/train_a1.sbatch. Gate: A1 >= A0 (5.317 NHD-z / 13.70 BEV@0.25).
+
+
+# ★ PARALLEL ARMS REGISTERED (2026-08-28, pre-A1-gate — specced before results can bias design)
+
+Discipline: each arm is a config-flag-scale change on the existing skeleton; NONE starts before
+the A1 gate reads out; the gate result REORDERS this list (contact bottleneck → A10 rises;
+good z but lagging AP → A8 rises; z gap on odd segments → A9 rises).
+
+| arm | design | question answered | closest prior / evidence base |
+|---|---|---|---|
+| **A8 IoU-supervised score head** | per-query head regresses realized 3D/BEV IoU (from matching, training-time); multiplied into the score at inference | can training-time quality estimation recover the ~half-of-AP the incumbent's confidence threw away (D0: 56% realized; D0c: post-hoc provably insufficient)? | AeroView D0/D0c measurements — the largest single lever found anywhere in the incumbent analysis |
+| **A9 terrain⊕regression fusion** | learned per-query gate fusing z_terrain and z_direct (head already built) | does regression contribute ANYTHING on top of terrain, or does the gate collapse to terrain-only (the stronger claim)? | CHARM3R (opposite-signed errors of regressed vs ground-geometric depth; fusion robust) |
+| **A10 center-ray lift variant** | cast through the CENTER pixel, solve ray∩(terrain + h_center); same TerrainField/intersect, one composition flag | robustness when ground contact is invisible (human audit: ~21% no visible feet; crowding 21.3%) | our audit data; spec's dh machinery already models stand-height |
+| **A11 track-consistency aux losses (TRAINING-TIME ONLY)** | (a) within-track log-dims variance penalty over the co-sampled 4 frames/segment (GT track_id; no SAM3 needed at train); (b) optional world-frame center smoothness — CAUTION: measured orientation-smoothing null (+0.3%; whole-track-coherent errors are PRESERVED by smoothness priors); dims constancy is exempt (exact constraint, not a prior) | does identity-level supervision beat per-frame labels whose per-frame dims are unstable (within-track std 0.21 — the track is a better teacher than the frame)? | Waymo offboard auto-labeling (Qi et al. CVPR'21: track-level size constancy); our motion-derived sign labels (tracking ALREADY load-bearing in training) |
+| **OV configuration row** | promptable 2D frontend (SAM3 concept prompts / GroundingDINO) → box/mask-conditioned queries → our lift; evaluate with one species held out as pseudo-novel; SAM3 masks upgrade contact to mask-bottom (the spec §1.1 preferred contact) | open-vocab aerial 3D: does the size-prior-FREE depth (contact-not-size) transfer to unseen species where generalists' category-size statistics fail? | A0-on-gdino already measured (NHD-z 6.079) = the pipeline exists; OVM3D-Det's LLM size priors for novel-class dims; herd grouping keys on prompt identity for novel species |
+| **GeoCalib input arm (minor)** | single-image pitch/gravity for the 40 gimbal-less videos → telemetry token + Tier-0 plane | unclaimed (recce): calibration-in-the-detector; strengthens deployment tiers | GeoCalib ECCV'24; our 0.73° telemetry bar to beat |
+
+**Settled boundaries re-affirmed while registering (user probed, answers unchanged):** SAM3
+features are NOT fused into the backbone (segmentation/identity-tuned, not geometric —
+re-evaluation verdict; also a mid-run architecture change); tracking does NOT enter inference
+(per-frame permanence + the measured smoothing-null mechanism); SAM3's inference-time roles are
+the OV frontend (masks → contact) and the MONITORING layer around the detector (identity spine
+for per-animal aggregation, EMA middle-ground, coverage/duty).

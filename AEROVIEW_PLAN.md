@@ -1999,3 +1999,60 @@ re-evaluation verdict; also a mid-run architecture change); tracking does NOT en
 (per-frame permanence + the measured smoothing-null mechanism); SAM3's inference-time roles are
 the OV frontend (masks → contact) and the MONITORING layer around the detector (identity spine
 for per-animal aggregation, EMA middle-ground, coverage/duty).
+
+
+# ★ TA-DETR M3 / A1 GATE RESULTS (2026-08-29) — GATE PASSED. Depth record broken. Sign bug found+fixed.
+
+**A1 recipe:** 15 epochs, stride-2 frames, batch 2seg×4fr + accum2, bf16+fp32 island, A40, 2.4-2.5 s/it
+(~30 h). Residual heads OFF (A1 semantics: learned contact + class + box2d; dims = class medians).
+
+## Detection (own detections, official evaluator + BEV + sane grader)
+| metric | **A1** | A0 (training-free) | incumbent FT (best/published) |
+|---|---:|---:|---:|
+| NHD-z | **3.296** | 5.317 | 5.878 / 5.970 |
+| overall NHD | **4.979** | 7.99 | 6.985 / 7.063 |
+| xy NHD | 2.343 | 3.32 | 2.199–2.211 |
+| pose NHD | 0.683 | 1.70 | 0.547–0.560 |
+| dims NHD | 1.471 (placeholder) | 1.90 | 0.776 |
+| AP3D | 11.50 | — | 13.17 (3-seed) |
+| BEV macro @0.25 / @0.50 | **26.94** / 5.43 | 13.70 / 3.07 | 24.31–27.14 / 8.20–9.44 |
+| sane: recall@.5 / z-raw / z-anchor-free | 79.5% / **1.23%** / **0.42%** | 100%* / 1.31 / 0.49 | 81.8% / 2.67 / 1.09 |
+
+**GATE (A1 ≥ A0 on NHD-z and BEV@0.50): PASS** — and beyond: NHD-z is 44% below the best fine-tuned
+model ever measured here, with OWN detections; overall NHD beats the incumbent despite placeholder
+dims; xy at incumbent level with no learned xy head; BEV@0.25 at the incumbent's 3-seed band.
+Remaining gaps are exactly the A1-predicted ones: dims (A3), strict-IoU footprint (dims+yaw),
+AP3D 11.5<13.17 (dims + ranking: score = raw class prob; A8's slot), 2D recall 79.5 vs 81.8.
+Giraffe AP3D 0.25 (n=110) — failure-mode section, investigate at A3. Per-species AP3D:
+elephant 19.1, plains 15.6, grevys 13.7, gazelle 11.2, rhino 9.1.
+
+## Orientation: SIGN INVERTED — bug found, fixed, preflight-armored (commit this log's)
+Sign 14.6% rhino / 26.0% usable-band = ANTI-correlated ⇒ convention bug, not non-learning.
+**Root cause:** sign target was computed against the frame's RAW GT axis angle (PCA-arbitrary
+branch) while the export decodes the CANONICAL branch from (sin2ψ,cos2ψ) — labels inverted on the
+|ψ|>π/2 subpopulation; concentrated-heading species (rhino R=0.847) sit in one branch ⇒ mass
+inversion. The AXIS ITSELF IS HEALTHY (pose NHD 0.683 ≈ incumbent 0.547). The PCA-sign trap, one
+level above where we defended. Fix: canonicalize ψ before the sign bit (dataset.py). New preflight
+**P16**: (axis embed, sign target) → export-decoded α must land within 90° of GT heading —
+verified on 311 labelled instances (worst 89.1°, at the theoretical bound). 13/13 preflights.
+Sign head must RETRAIN (labels were wrong) — folded into A2.
+
+## gt2d box-conditioned parity mode: BROKEN AS BUILT — discard its numbers (z 10.4 etc.)
+2D AP 99.7 (boxes flow), but all boxes share ONE cloned generic query — a configuration the model
+never trained in ⇒ OOD features ⇒ contact/z collapse. NOT a model failure; an eval-mode design
+error. Fix = DN-DETR-style box-conditioned query groups AT TRAINING (the spec's own contingency);
+until then the honest parity evidence = own-mode + matched-TP sane analysis.
+
+## Convergence: NOT converged at 15 epochs
+ep10→ep15: recall 74.2→79.5 (+5.3), z-raw 1.36→1.23%. More epochs will pay.
+
+## ⇒ A2 SPEC (next run; one training, self-ablating where possible)
+Spec-A2 heads ON (+height_residual, +center_offset) + the carried fixes:
+(1) sign-target canonicalization (in this commit) ⇒ sign head retrains correctly;
+(2) 30 epochs (convergence evidence);
+(3) DN-style box-conditioned query groups at training ⇒ working oracle-parity mode + matching
+    stability [to build];
+(4) A8 IoU-supervised score head [to build] — self-ablating at eval (score with/without
+    calibration multiplier), so attribution survives sharing the run;
+(5) judged against: A1 (this run, frozen) + A0 rows; orientation vs per-species floors (first
+    valid sign read post-fix).
